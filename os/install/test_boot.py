@@ -41,6 +41,30 @@ PAGE, STRIDE, ERASE = 2048, 2112, 131072
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 def raw(start): return start // PAGE * STRIDE
 
+def retire_boot_container(proc, tag):
+    """Bound the owned container stop, frontend reap and final absence check."""
+    def engine(args, timeout):
+        try:
+            return subprocess.run(['podman', *args], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            return 'timeout'
+
+    def reap(timeout):
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return 'timeout'
+
+    record = {'stop': engine(['stop', '--time', '1', tag], 60), 'process': reap(30)}
+    if record['stop'] != 0 or record['process'] == 'timeout':
+        record['remove'] = engine(['rm', '--force', '--ignore', tag], 60)
+        record['process'] = reap(60)
+    record['exists'] = engine(['container', 'exists', tag], 30)
+    record['passed'] = record['exists'] == 1 and record['process'] != 'timeout'
+    return record
+
+
 def retain_codec_audit(out, cycle):
     """Bounded numeric model state, never a physical or analog observation."""
     with socket.socket(socket.AF_UNIX) as control:
@@ -785,9 +809,12 @@ def main():
                 if display is not None:
                     try: display_result = display.finish()
                     except Exception as error: display_result = dict(error=type(error).__name__)
-                subprocess.run(['podman','stop','--time','1',tag],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-                proc.wait(timeout=10)
-                if telemetry_admission:result['telemetry_scope_end']='disposable-guest-processes-retired; no live production handoff'
+                retirement = retire_boot_container(proc, tag)
+                result.setdefault('container_cleanup', []).append(retirement)
+                if not retirement['passed']:
+                    result['passed'] = False
+                if telemetry_admission and retirement['passed']:
+                    result['telemetry_scope_end'] = 'disposable-guest-processes-retired; no live production handoff'
                 result['protected_unchanged']=before==protected_hashes()
                 if not result['protected_unchanged']: result['passed']=False
                 if card_image:
