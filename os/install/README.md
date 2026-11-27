@@ -249,3 +249,13 @@ normal regulatory policy. A kit made without these files must be prepared
 again. For later app builds, keep the selected q2-os Release assets pinned
 and pass the same verified kit to `compose_stock.py image`. The kit is a
 local input pending review of the Wi-Fi firmware's redistribution terms.
+
+After composing the stock candidate, check both packed roots and the
+running kernel with the public QEMU executable. The test uses the kernel
+ELF retained in the local kit to read back the accepted database.
+
+```sh
+python3 os/install/test_stock_regdb.py --image build/os/stock-candidate-01 \
+  --kit build/os/stock-inputs-01 --qemu QEMU_SYSTEM_MIPSEL \
+  --out build/os/stock-regdb-check-01
+```
