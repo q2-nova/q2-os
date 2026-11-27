@@ -149,7 +149,7 @@ Release metadata is checked separately. The audit verifies artifact manifests,
 exact root deltas (including modes, directories and symlinks), app/version
 consistency, and unchanged kernel/DTB/rescue/modules/platform. It rejects tree
 structure or permission changes; use the full builder for those broader updates.
-Inputs must be generated build trees, never mounted owner data. Reports contain
+Inputs must be generated build trees, never mounted personal data. Reports contain
 identities/paths only. This audit does not compare the unpacked tree with packed
 SquashFS contents, boot an image, or qualify hardware: those remain explicit
 packaging/emulator/install gates. Run the USB runtime gate above as well.
@@ -190,28 +190,24 @@ It compares all 4096 bad-block patterns on a generated 12-block image against
 an independently generated skip-bad writer, plus capacity/overflow/scan errors.
 The container sanitizer run also passed. Kernel build checks are separate.
 
-`test_boot.py` uses a sanitized `qemu/mkflash.py` full-chip fixture with erased
-identity, selector and userdata. It inserts the candidate at the real offsets,
-boots the real SPL, and checks protected byte hashes. `--bad-blocks 0,2,7`
-marks OOB bad blocks and writes root data around them. `--corrupt-root` checks
-the rescue path. Generated `--key` and `--host-public-key` enable actual pinned
-USB SSH checks; no physical device address is used. `--userdata-image` accepts
-an explicitly generated UBI fixture and requires SSH state checks; `--boots 2`
-restarts the emulator using the same NAND and checks a generated persistent
-marker. This fixture option is never part of production startup.
+`test_boot.py` boots a sanitized full-chip NAND fixture (`--base-nand`: the
+bootloader with erased identity, selector and userdata, as the q2-factory
+emulator flash builder makes it). It inserts the candidate at the real
+offsets, boots the real SPL, and checks protected byte hashes.
+`--bad-blocks 0,2,7` marks OOB bad blocks and writes root data around them.
+`--corrupt-root` checks the rescue path. Generated `--key` and
+`--host-public-key` enable USB SSH checks; no physical device address is
+used. `--userdata-image` accepts an explicitly generated UBI fixture
+(`generated_userdata.py`) and requires SSH state checks; `--boots 2` restarts
+the emulator on the same NAND and checks a generated persistent marker.
+`--modeled-energy` records the model's energy per guest script with the
+analyzer module given as `--energy-analyzer` (the QEMU fork's
+`tests/q2/energy_window.py`). These fixture options are never part of
+production startup.
 
-Normal and three-bad-block roots reach installed init, with protected partitions
-and blank userdata unchanged. The exact V0.11 service-integrated candidate passes
-two generated-state boots, no-SD player health and corrupt-root USB SSH. Stock
-recovery writes its exact payload bytes; the recovery-written NAND cold boots
-to USB SSH, persistent state and live player health. The primary also reports
-the first physical V0.11 installation/automatic player boot. Successive updates,
-repeated physical boots and broader hardware behavior remain separate checks.
-V0.11 subsequently failed its second physical boot after userdata writes;
-internal persistence is not qualified. The actual device is Q1GA/E5-71,
-128 MiB and one plane, correcting the emulator-derived Q2GA assumption.
-See [exact hashes and qualification](../../docs/mainline-installation.md) and
-[the maintained checklist](../../docs/mainline-feature-checklist.md).
+Physical installation of an installed candidate is qualified separately;
+internal persistence across physical boots after userdata writes is not
+qualified. The device's NAND is a Q1GA/E5-71 (128 MiB, one plane).
 
 ## Stock candidate from verified OS inputs
 

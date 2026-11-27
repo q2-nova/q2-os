@@ -201,7 +201,7 @@ def telemetry_context(ssh, out, cycle, admission, *, final=False, records=None):
     if len(lines)!=2:raise ValueError('generated boot telemetry ACK inventory')
     ack=json.loads(lines[0]);match=re.fullmatch(r'Q2_TELEMETRY_PROCESS ([1-9][0-9]*) ([1-9][0-9]*)',lines[1])
     if not match:raise ValueError('generated boot telemetry process witness')
-    generated_userdata.telemetry_overlay.validate_ack(ack,nonce,tuple(map(int,match.groups())))
+    generated_userdata.telemetry_fixture.validate_ack(ack,nonce,tuple(map(int,match.groups())))
     if (ack['run_id']!=admission['run_id'] or ack['stream']!='automated-test'
         or ack['labels']!=['automated-test'] or not ack['enabled'] or not ack['overlay_present']):
         raise ValueError('first-player generated telemetry context differs')
@@ -396,13 +396,14 @@ def main():
     p.add_argument('--debug-sd-requests',action='store_true',
                    help='retain command and data-block traces for a generated microSD')
     p.add_argument('--measure-deep-wake', action='store_true', help='press Power in verified retained sleep and measure lit scanout in virtual time')
-    p.add_argument('--capture-boot-display', action='store_true',
-                   help='observe display changes through the owned guest QMP socket during cold boot')
     p.add_argument('--host-cpuset', help='comma-separated CPU IDs for the container QEMU process')
     p.add_argument('--initial-ssh-delay', type=int, default=0,
                    help='delay first boot SSH probe until this many seconds after launch (0–180)')
     p.add_argument('--audio-capture', action='store_true', help='retain per-boot digital WAV/format-aware PCM from the generated guest')
     p.add_argument('--modeled-energy', action='store_true', help='record virtual energy by component for each guest script')
+    p.add_argument('--energy-analyzer', type=Path,
+                   help="with --modeled-energy: the energy analyzer module (control, snapshot, window), such as the QEMU "
+                        "fork's tests/q2/energy_window.py; its hash is recorded with the run")
     p.add_argument('--energy-icount-shift', type=int, choices=range(0, 6),
                    help='virtual ns per instruction as 2**shift for energy workloads (default: 1)')
     p.add_argument('--energy-profile', type=Path, help='Q2 model coefficient overrides, frozen with this run')
@@ -425,7 +426,8 @@ def main():
             p.error("deep wake requires a generated single-boot player phase and modeled clocks")
         from deep_wake import measure as wake_observer
     energy = None
-    if (a.energy_wifi or a.energy_bt or a.energy_profile or a.energy_icount_shift is not None) and not a.modeled_energy:
+    if (a.energy_wifi or a.energy_bt or a.energy_profile or a.energy_icount_shift is not None
+            or a.energy_analyzer) and not a.modeled_energy:
         p.error('energy options require --modeled-energy')
     if a.nand_ds35q1ga_ecc_read_us is not None and not (a.nand_ds35q1ga and a.modeled_energy):
         p.error('DS35Q1GA ECC timing trial requires --nand-ds35q1ga and --modeled-energy')
@@ -434,7 +436,9 @@ def main():
             a.energy_icount_shift = 1
         if not a.guest_script:
             p.error('modeled energy requires a bounded guest workload')
-        spec = importlib.util.spec_from_file_location('q2_energy', SOURCE_ROOT/'qemu/tools/energy.py')
+        if a.energy_analyzer is None or not a.energy_analyzer.is_file():
+            p.error('modeled energy requires --energy-analyzer')
+        spec = importlib.util.spec_from_file_location('q2_energy', a.energy_analyzer.resolve())
         energy = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(energy)
     if a.codec_pdn_stuck and not a.audio_capture:p.error('codec fault requires retained audio audit')
@@ -570,11 +574,8 @@ def main():
         with profile.open('xb') as dest:
             dest.write(a.energy_profile.read_bytes())
         command[command.index('-M')+1] += ',power-model=' + container_path(profile)
-    if a.debug_qmp or a.capture_boot_display:
+    if a.debug_qmp:
         command.extend(['-qmp','unix:'+container_path(out/'qmp.sock')+',server=on,wait=off'])
-    if a.capture_boot_display:
-        sys.path.insert(0, str(SOURCE_ROOT / 'tests/perf'))
-        from cold_boot_display import BootDisplay
     if a.debug_guest_errors:command.extend(['-d','guest_errors'])
     if a.debug_sd_requests:
         for event in ('sdhci_send_command', 'sdcard_read_block', 'sdcard_write_block'):
@@ -645,12 +646,8 @@ def main():
                 if cycle==0:result['command']=launch_command
                 result['debug_cpm']=True
             proc=subprocess.Popen(launch_command,stdout=log,stderr=subprocess.STDOUT)
-            display = None
             bad_proof = None
             try:
-                if a.capture_boot_display:
-                    display = BootDisplay(out, cycle, launched, container_path)
-                    display.start()
                 marker='Q2_INSTALL_ROOT_FAILED' if a.corrupt_root else 'Q2_INSTALLED_ROOT_READY'
                 end=time.monotonic()+ready_timeout_s
                 previous_console_poll = launched
@@ -815,10 +812,6 @@ def main():
                     try: codec_audit = retain_codec_audit(out,cycle)
                     except (OSError,ValueError) as error:
                         codec_audit = dict(unavailable=type(error).__name__)
-                display_result = None
-                if display is not None:
-                    try: display_result = display.finish()
-                    except Exception as error: display_result = dict(error=type(error).__name__)
                 retirement = retire_boot_container(proc, tag)
                 result.setdefault('container_cleanup', []).append(retirement)
                 if not retirement['passed']:
@@ -833,8 +826,6 @@ def main():
                     if not result[check_key]:
                         result['passed'] = False
                 boot_result = {'cycle':cycle,'passed':result['passed']}
-                if display_result is not None:
-                    boot_result['display'] = display_result
                 if a.audio_capture:
                     boot_result['codec_audit'] = codec_audit
                     boot_result['audio_capture'] = [dict(path=path.name,sha256=sha(path),bytes=path.stat().st_size)

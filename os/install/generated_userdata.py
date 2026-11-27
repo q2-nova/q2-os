@@ -10,19 +10,13 @@ import json
 from pathlib import Path
 import re
 import subprocess
-import shutil
-import tomllib
 import sys
 import uuid
 
 ROOT=Path(__file__).resolve().parents[2]
-CANON=Path(subprocess.check_output(['git','-C',str(ROOT),'rev-parse','--path-format=absolute','--git-common-dir'],text=True).strip()).parent
-sys.path.insert(0,str(ROOT/'tests/perf'))
-import telemetry_overlay
-sys.path.insert(0,str(ROOT/'tools'))
-import q2_app_package
 sys.path.insert(0,str(ROOT/'os/install'))
 import startup_read_ahead as reader
+import telemetry_fixture
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -48,8 +42,8 @@ def tools(out):
     (out/'result.json').write_text(json.dumps(result,indent=2)+'\n');return result
 
 
-def stage(out,run_id,*,endpoint=None,token=None,app=None,tailnet=None):
-    """Construct synthetic state and optionally one admitted generated package."""
+def stage(out,run_id,*,endpoint=None,token=None,tailnet=None):
+    """Construct synthetic state with the generated telemetry overlay."""
     out=fresh(out);tree=out/'root';state=tree/'q2-mainline';context=state/'.telemetry-fixture'
     context.mkdir(parents=True,mode=0o700);data=state/'Q2Navidrome';data.mkdir(mode=0o700)
     config=b'[wifi]\nenabled=false\n[tailscale]\nenabled=false\n[power]\nsleep_minutes=0\n[display]\nclicker=false\n'
@@ -62,28 +56,14 @@ def stage(out,run_id,*,endpoint=None,token=None,app=None,tailnet=None):
     # Retain the original path for fixtures built against older app layouts.
     for name in ('config.toml', 'config.last-valid.toml'):
         path=data/name;path.write_bytes(config);path.chmod(0o600)
-    overlay=telemetry_overlay.render(run_id,endpoint=endpoint,token=token)
+    overlay=telemetry_fixture.render(run_id,endpoint=endpoint,token=token)
     (context/'overlay.toml').write_bytes(overlay);(context/'overlay.toml').chmod(0o600)
     (context/'owner').write_text(f'Q2_TELEMETRY_FIXTURE 1 {run_id} {sha(context/"overlay.toml")}\n');(context/'owner').chmod(0o600)
-    app_identity=None
-    if app is not None:
-        image,manifest,proof=map(Path,app)
-        for path in (image,manifest,proof):
-            if path.is_symlink() or not path.resolve().is_relative_to(CANON/'build') or not path.is_file():
-                raise ValueError('generated regular package files required')
-        app_identity=q2_app_package.admit(image,manifest)
-        proof_data=json.loads(proof.read_text())
-        if proof_data.get('passed') is not True or any(proof_data.get(k)!=v for k,v in app_identity.items()):
-            raise ValueError('exact successful package proof required')
-        fixture=state/'.app-update-fixture';fixture.mkdir(mode=0o700)
-        shutil.copyfile(image,fixture/'app.squashfs');shutil.copyfile(manifest,fixture/'manifest.txt')
-        if q2_app_package.admit(fixture/'app.squashfs',fixture/'manifest.txt')!=app_identity:
-            raise ValueError('copied package changed')
-    return out,dict(schema=1,generated_only=True,app_identity=app_identity,run_id=run_id,telemetry=telemetry_overlay.projection(run_id,endpoint=endpoint,token=token),
+    return out,dict(schema=1,generated_only=True,run_id=run_id,telemetry=telemetry_fixture.projection(run_id,endpoint=endpoint,token=token),
                     tree_sha256={str(p.relative_to(tree)):sha(p) for p in tree.rglob('*') if p.is_file()})
 
 
-def build(out,tool_receipt,run_id,*,endpoint=None,token=None,app=None,tailnet=None):
+def build(out,tool_receipt,run_id,*,endpoint=None,token=None,tailnet=None):
     if endpoint is None or token is None:raise ValueError('generated receiver base endpoint and synthetic token required')
     tool_receipt=Path(tool_receipt).resolve();tool=json.loads(tool_receipt.read_text())
     if (not tool_receipt.is_relative_to(ROOT/'build') or tool.get('passed') is not True
@@ -91,7 +71,7 @@ def build(out,tool_receipt,run_id,*,endpoint=None,token=None,app=None,tailnet=No
         or tool['recipe_sha256']!=sha(ROOT/'os/install/TelemetryFixture.Containerfile')
         or tool['tools_sha256']!=sha(tool_receipt.parent/'tools.log')):
         raise ValueError('exact generated UBI tools receipt required')
-    out,result=stage(out,run_id,endpoint=endpoint,token=token,app=app,tailnet=tailnet)
+    out,result=stage(out,run_id,endpoint=endpoint,token=token,tailnet=tailnet)
     (out/'ubinize.cfg').write_text('[user_data]\nmode=ubi\nimage=/fixture/userdata.ubifs\nvol_id=0\nvol_type=dynamic\nvol_name=user_data\nvol_size=16MiB\nvol_flags=autoresize\n')
     name='q2-generated-userdata-'+uuid.uuid4().hex[:12]
     command=['podman','run','--rm','--name',name,'--network','none','--security-opt','label=disable','-v',f'{out}:/fixture',tool['image'],'sh','-ec',
@@ -126,7 +106,7 @@ def admit(image,candidate, *, require_candidate_hook=True):
         expected = reader.render(template, record).encode()
         if (candidate/'root'/reader.INIT).read_bytes() != expected:
             raise ValueError('candidate lacks exact pre-first-player fixture hook')
-    telemetry_overlay.settings(value['run_id'])
+    telemetry_fixture.settings(value['run_id'])
     return dict(path=str(receipt.resolve()),sha256=sha(receipt),run_id=value['run_id'],
                 userdata_sha256=value['userdata_sha256'],preboot_provisioned=True,candidate_hook_verified=require_candidate_hook,effective_context_verified=False)
 
@@ -134,7 +114,6 @@ def admit(image,candidate, *, require_candidate_hook=True):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['tools','build']);p.add_argument('--out',type=Path,required=True)
     p.add_argument('--tools',type=Path);p.add_argument('--run-id')
-    p.add_argument('--app-image',type=Path);p.add_argument('--app-manifest',type=Path);p.add_argument('--app-proof',type=Path)
     p.add_argument('--endpoint');p.add_argument('--token-file',type=Path,help='explicit generated receiver token under build/')
     a=p.parse_args()
     if a.action=='tools':tools(a.out)
@@ -142,8 +121,6 @@ def main():
         if not a.tools or not a.run_id or not a.endpoint or not a.token_file:p.error('build requires --tools, --run-id, --endpoint and --token-file')
         token_path=a.token_file.resolve()
         if not token_path.is_relative_to(ROOT/'build') or token_path.is_symlink() or token_path.stat().st_size>65:p.error('bounded generated token under build/ required')
-        app=(a.app_image,a.app_manifest,a.app_proof)
-        if any(app) and not all(app):p.error('all three app package files required')
-        build(a.out,a.tools,a.run_id,endpoint=a.endpoint,token=token_path.read_text().strip(),app=app if all(app) else None)
+        build(a.out,a.tools,a.run_id,endpoint=a.endpoint,token=token_path.read_text().strip())
 
 if __name__=='__main__':main()
