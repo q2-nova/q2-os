@@ -4,10 +4,18 @@ case "$1" in
 start)
     mkdir -p /run/q2nd /state/app
     /usr/sbin/q2-player-supervisor >> /run/q2nd/supervisor.log 2>&1 &
-    n=0
+    # A retained player normally needs only the supervisor to bind its
+    # socket. Poll promptly at first, then keep the existing slow-start budget.
+    wait_ms=0
     while [ ! -S /run/q2nd/health.sock ] && [ ! -f /run/q2nd/rescue ]; do
-        n=$((n+1)); [ "$n" -lt 50 ] || exit 1
-        sleep 0.1
+        if [ "$wait_ms" -lt 100 ]; then
+            wait_ms=$((wait_ms+10))
+            sleep 0.01
+        else
+            wait_ms=$((wait_ms+100))
+            [ "$wait_ms" -lt 5000 ] || exit 1
+            sleep 0.1
+        fi
     done
     ;;
 stop)

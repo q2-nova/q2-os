@@ -9,6 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / 'os/install/integration/sbin/q2-system-sleep'
+SUPERVISOR = ROOT / 'os/overlay/etc/init.d/S79q2-supervisor'
 
 
 def proof(**changes):
@@ -282,6 +283,49 @@ main
                 self.assertNotIn('mem', events)
                 target.write_text(old)
                 (self.root / 'events').unlink(missing_ok=True)
+
+
+class SupervisorStartupTest(unittest.TestCase):
+    def test_prompt_health_rescue_and_bounded_slow_start(self):
+        source = SUPERVISOR.read_text().replace('/run/q2nd', '"$FIXTURE/run"')
+        source = source.replace('/state/app', '"$FIXTURE/state"')
+        source = source.replace('/proc/cmdline', '"$FIXTURE/cmdline"')
+        source = source.replace('/usr/sbin/q2-player-supervisor', ':')
+        base = ROOT / 'build/sleep-tests'
+        base.mkdir(parents=True, exist_ok=True)
+        for ready in ('health', 'rescue', 'never'):
+            with self.subTest(ready=ready), tempfile.TemporaryDirectory(dir=base, prefix='supervisor-') as directory:
+                root = Path(directory)
+                (root / 'run').mkdir()
+                (root / 'cmdline').write_text('generated boot\n')
+                with socket.socket(socket.AF_UNIX) as endpoint:
+                    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        endpoint.bind(f'/proc/self/fd/{fd}/staged.sock')
+                    finally:
+                        os.close(fd)
+                    # Supply readiness during the first poll without relying on
+                    # host scheduler timing. The real script tests the socket.
+                    script = """
+sleep() {
+    echo "$1" >> "$FIXTURE/sleeps"
+    case "$READY" in
+        health) mv "$FIXTURE/staged.sock" "$FIXTURE/run/health.sock" ;;
+        rescue) touch "$FIXTURE/run/rescue" ;;
+    esac
+}
+""" + source
+                    result = subprocess.run(['sh', '-c', script, 'supervisor', 'start'],
+                                            env=dict(os.environ, FIXTURE=directory, READY=ready),
+                                            capture_output=True, text=True, timeout=5)
+                delays = [float(seconds) for seconds in (root / 'sleeps').read_text().splitlines()]
+                if ready == 'never':
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertAlmostEqual(sum(delays), 4.9)
+                    self.assertLess(len(delays), 60)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(delays, [0.01])
 
 
 if __name__ == '__main__':
