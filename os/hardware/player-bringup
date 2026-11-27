@@ -93,6 +93,14 @@ else
     for driver in i2c-gpio axp20x-i2c axp20x_usb_power axp20x_battery axp20x-regulator i2c-jz4780; do
         load "$driver"
     done
+    # Take ownership of optional panel reset as soon as its bus is present.
+    # Panel failure leaves the physical button and wheel paths usable.
+    if [ -d /sys/firmware/devicetree/base/i2c@10053000/touchscreen@15 ]; then
+        if ! modprobe shanling-q2-touchscreen >> "$log" 2>&1 ||
+            [ ! -L /sys/bus/i2c/drivers/shanling-q2-touchscreen/3-0015 ]; then
+            echo 'Optional touchscreen did not bind.' >> "$log"
+        fi
+    fi
     [ -d /sys/class/power_supply/axp20x-battery ] ||
         fail 'PMIC battery driver did not bind; codec power-up was not attempted.'
 fi

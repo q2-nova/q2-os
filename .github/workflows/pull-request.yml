@@ -1,0 +1,40 @@
+name: OS host checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  source-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check Python entry points and shell syntax
+        run: |
+          python3 -m compileall -q os
+          python3 os/build.py --help
+          python3 os/install/prepare.py --help
+          python3 os/install/build.py --help
+          for script in os/hardware/player-bringup os/install/bootstrap os/install/diagnostic-ssh os/install/qemu-ready os/install/root-init os/install/state; do
+            sh -n "$script"
+          done
+      - name: Test artifact and root filesystem input controls
+        run: |
+          python3 os/test_compatibility_inputs.py
+          python3 os/test_timezone_data.py
+          python3 os/test_usb_runtime.py
+          python3 os/install/test_packaging_profile.py
+      - name: Compile and inspect the native platform bridge
+        run: |
+          mkdir -p build/ci
+          gcc -Wall -Wextra -Werror -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -fPIC -shared \
+            -o build/ci/libq2platform.so os/platform/display.c os/platform/input.c
+          nm -D --defined-only build/ci/libq2platform.so >build/ci/platform-symbols.txt
+          grep -E ' T q2_touchscreen_open$' build/ci/platform-symbols.txt
+          grep -E ' T q2_touchscreen_state$' build/ci/platform-symbols.txt
