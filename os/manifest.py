@@ -21,10 +21,7 @@ env = {
     'emulation_only': True,
     'input_files': {},
 }
-# Deliberately enumerate repository source files, never ignored runtime/config data.
-tracked = capture(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', 'q2/recovery']).split('\0')
-files = [ROOT / name for name in tracked if name]
-files += [p for p in (ROOT / 'os').rglob('*') if p.is_file() and '__pycache__' not in p.parts]
+files = [p for p in (ROOT / 'os').rglob('*') if p.is_file() and '__pycache__' not in p.parts]
 for path in sorted(files): env['input_files'][str(path.relative_to(ROOT))] = sha(path)
 packages = {}
 metadata = json.loads(capture(['cargo', 'metadata', '--locked', '--offline', '--format-version=1',

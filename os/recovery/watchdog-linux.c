@@ -67,7 +67,7 @@ static int linux_ioctl(int fd, unsigned long request, ...)
 #define open linux_open
 #define ioctl linux_ioctl
 #define main supervisor_main
-#include "../../q2/recovery/trial.c"
+#include "trial.c"
 #undef main
 #undef ioctl
 #undef open

@@ -1,4 +1,4 @@
-/* One-shot userspace pivot. The stock kernel/init/SSH stay alive.
+/* One-shot userspace pivot. The running kernel, init and SSH stay alive.
  * stdin carries host heartbeats; EOF, lease expiry and deadline terminate
  * the candidate. Nothing installs a boot selection on persistent storage.
  * Trusted development images only: mount namespaces are not kernel isolation.
@@ -70,7 +70,7 @@ static void enter_root(const char *root, int output, pid_t parent) {
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) die("private mounts");
     if (mount(root, root, NULL, MS_BIND, NULL) || chdir(root)) die("root mount");
     if (syscall(SYS_pivot_root, ".", "oldroot")) die("pivot_root");
-    if (chdir("/") || umount2("/oldroot", MNT_DETACH)) die("detach stock root");
+    if (chdir("/") || umount2("/oldroot", MNT_DETACH)) die("detach host root");
     /* No host proc/sys/dev/card is exposed. Candidate changes disappear with
      * this private mount namespace and its RAM-backed staging directory. */
     if (mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "size=4m,mode=1777"))

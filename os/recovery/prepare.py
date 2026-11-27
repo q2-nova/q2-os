@@ -16,13 +16,12 @@ OUT.mkdir(exist_ok=True)
 cc = WORK / 'out/host/bin/mipsel-buildroot-linux-gnu-gcc'
 flags = ['-O2', '-Wall', '-Wextra', '-Werror', '-D_FILE_OFFSET_BITS=64',
          '-D_TIME_BITS=64', '-Wl,-z,noexecstack']
-sources = {'trial': ROOT / 'q2/recovery/trial.c',
+sources = {'trial': ROOT / 'os/recovery/trial.c',
            'trial-linux-watchdog': ROOT / 'os/recovery/watchdog-linux.c',
            'trial-watchdog': ROOT / 'os/recovery/watchdog-adapter.c',
            'daemon-fixture': ROOT / 'os/recovery/daemon-fixture.c',
            'kexec-probe': ROOT / 'os/recovery/kexec-probe.c'}
-manifest = {'emulation_only': True, 'supervisor_origin_commit': 'd850518',
-            'supervisor_sha256': sha(sources['trial']), 'artifacts': {}}
+manifest = {'emulation_only': True, 'supervisor_sha256': sha(sources['trial']), 'artifacts': {}}
 for name, source in sources.items():
     run([cc, *flags, source, '-o', OUT / name])
     manifest['artifacts'][name] = {'sha256': sha(OUT / name), 'elf': elf(OUT / name)}

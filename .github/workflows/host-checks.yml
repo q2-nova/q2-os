@@ -19,7 +19,7 @@ jobs:
         run: python3 tools/check_docs.py
       - name: Check Python entry points and shell syntax
         run: |
-          python3 -m compileall -q os q2 kernel tools
+          python3 -m compileall -q os kernel tools
           python3 os/build.py --help
           python3 os/rust-build.py --help
           python3 os/x2000-c-build.py --help
@@ -27,7 +27,7 @@ jobs:
           python3 os/install/build.py --help
           python3 os/install/generated_userdata.py --help
           python3 os/install/test_boot.py --help
-          for script in os/hardware/player-bringup os/hardware/usb-storage os/install/bootstrap os/install/card-ssh os/install/diagnostic-ssh os/install/qemu-ready os/install/root-init os/install/state os/launcher.sh q2/recovery/build.sh; do
+          for script in os/hardware/player-bringup os/hardware/usb-storage os/install/bootstrap os/install/card-ssh os/install/diagnostic-ssh os/install/qemu-ready os/install/root-init os/install/state os/launcher.sh; do
             sh -n "$script"
           done
       - name: Test artifact and root filesystem input controls
@@ -45,7 +45,7 @@ jobs:
           python3 os/test_x2000_c.py
           python3 os/compose_ci.py --help
           python3 os/install/kernel_base.py --help
-      - name: Test SSH keys, the launcher, card storage and recovery helpers
+      - name: Test SSH keys, the launcher and card storage
         run: |
           python3 os/hardware/test_hostkey.py
           python3 os/test_launcher.py
@@ -56,8 +56,6 @@ jobs:
           python3 os/test_memory_guard.py
           python3 os/install/test_guest_script.py
           python3 os/install/test_guest_failure.py
-          python3 q2/recovery/test_trial.py
-          python3 q2/recovery/test_watchdog.py
       - name: Compile and inspect the native platform bridge
         run: |
           mkdir -p build/ci

@@ -69,7 +69,7 @@ static int fixture_ioctl(int fd, unsigned long request, ...)
 #define open fixture_open
 #define ioctl fixture_ioctl
 #define main supervisor_main
-#include "../../q2/recovery/trial.c"
+#include "trial.c"
 #undef main
 #undef ioctl
 #undef open
