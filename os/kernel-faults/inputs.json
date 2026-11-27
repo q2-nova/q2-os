@@ -1,0 +1,10 @@
+{
+  "qemu": {
+    "url": "https://github.com/q2-nova/q2-toolchain/releases/download/qemu-v0.1.0-rc.1/qemu-linux-x86_64.tar.gz",
+    "sha256": "61a609791d95036de1a0139f1ca479ffe4b16daf128f76d806529b310ac36ec8"
+  },
+  "rescue": {
+    "url": "https://github.com/q2-nova/q2-os/releases/download/v0.1.0-rc.3/rescue.cpio",
+    "sha256": "4f0d7f6e8d59b15947c23beddb4de6d082a01bfbb68351608bd80e498417895a"
+  }
+}

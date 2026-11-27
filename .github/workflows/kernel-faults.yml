@@ -1,0 +1,62 @@
+name: Kernel fault suites
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/kernel-faults.yml'
+      - 'os/kernel-faults/**'
+      - 'os/kernel_faults.py'
+      - 'os/test_storage_faults.py'
+      - 'os/test_watchdog_uapi.py'
+      - 'os/install/kernel_build.py'
+      - 'os/sources.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kernel-faults.yml'
+      - 'os/kernel-faults/**'
+      - 'os/kernel_faults.py'
+      - 'os/test_storage_faults.py'
+      - 'os/test_watchdog_uapi.py'
+      - 'os/install/kernel_build.py'
+      - 'os/sources.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  emulator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Fetch the pinned QEMU and rescue releases
+        run: python3 os/kernel_faults.py fetch
+      - name: Install the QEMU runtime and exFAT tools
+        run: |
+          mapfile -t runtime < <(jq -r '.files[].runtime_dependencies[].package' \
+            build/os/kernel-faults/qemu/qemu-artifact.json | sort -u)
+          for name in "${runtime[@]}"; do
+            [[ "$name" =~ ^[a-z0-9][a-z0-9+.-]*(:amd64)?$ ]]
+          done
+          sudo apt-get update
+          sudo apt-get install -y exfatprogs "${runtime[@]}"
+      - name: Build the fault kernel from the production Linux revision
+        run: |
+          python3 os/install/prepare.py --dest build/os/fault-kernel-src
+          python3 os/kernel_faults.py build --kernel-source build/os/fault-kernel-src
+      - name: microSD and NAND fault recovery
+        run: python3 os/test_storage_faults.py
+      - name: Watchdog UAPI
+        run: python3 os/test_watchdog_uapi.py
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-fault-runs
+          path: |
+            build/os/kernel-faults/runs/*/
+            build/os/kernel-faults/kernel/artifact.json
+          if-no-files-found: ignore
+          retention-days: 14
