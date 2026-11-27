@@ -19,6 +19,44 @@ its 7. Host checks run `python3 os/test_kernel_faults.py`,
 which tests the builder, the initramfs composition, the media layouts and the
 harness's QEMU command lines without an emulator.
 
+## Driver functions
+
+`os/test_driver_functions.py` runs the Q2's own driver code on the host. Each
+harness in `os/driver-functions/` takes functions, tables and constants
+verbatim from the production Linux tree, compiles them with ASan and UBSan
+against models of the kernel services they call, and runs them over
+generated register states and faults. Each harness also runs with mutated
+copies of the production code, and each mutant must fail with its named
+assertion, so a check that stops detecting its defect fails the suite. A
+function, table or mutation site missing from the tree fails the run: the
+driver changed and its harness must follow it. They are host results: they
+cover the drivers' logic, not bus timing or the electrical behaviour of the
+parts.
+
+```sh
+python3 os/install/prepare.py --dest build/os/fault-kernel-src
+python3 os/test_driver_functions.py --kernel-source build/os/fault-kernel-src
+```
+
+`Q2_KERNEL_SOURCE` names the tree when `--kernel-source` is absent; without
+either, only the extractor's own tests run and the harnesses skip. The
+compiler is `$CC`, `cc` or `clang`, the first that links ASan and UBSan.
+Generated sources, binaries and logs go to `build/os/driver-functions/`. The
+`driver-functions` job of the kernel fault workflow runs it in about a
+minute; host checks run the extractor tests.
+
+| Harness | Production code | Checks | Mutants that must fail |
+| --- | --- | --- | --- |
+| `axp2101-charge` | `axp20x_battery.c` charge behaviour, fault reads, policy token and charge-current selector; the AXP2101 writeable and volatile tables of `mfd/axp20x.c`; regmap's read, write, update and cache paths | for 256 values of REG18, `auto` and `inhibit` change bit 1 only, emit one change event and read back; invalid values are refused; any charger or temperature event refuses `auto` (an event stays recorded, the status bit is live) while `inhibit` stays possible; an unreadable fault register refuses `auto` without a write; a failed REG18 read or write changes nothing and the readback shows the PMIC's value, also after a PMIC reset; every manual write advances the policy generation; a used, older, newer or foreign token is refused, a refused control spends its token, and at the counter's end policy stops while the manual control remains; the charge current takes exactly the 16 supported values up to the probe's ceiling (POWER-001) | charge enable on bit 2; `auto` accepted with a fault; manual write without revoking policy; REG18 cached; stale generation accepted; current truncated to a step |
+| `axp2101-powerkey` | `axp2101_q2_powerkey_init` | for 256 values of register 0x27, bits 5:0 become 0x1d and bits 7:6 and every other register keep their values; only a Q2 with an AXP2101 is touched; the readback comes from the PMIC, and an update error, a readback error or a mismatch warns without logging the timing | readback through the cache; reserved bits overwritten |
+| `wheel` | `shanling-q2-wheel.c` register read, normal mode, release and interrupt | position and ID reads are a write and a read, STOP-separated under one segment lock, retried once as a whole; errors and short transfers return errors; an error or a position above 200 cancels the gesture; normal mode sends `00`, waits 1 to 2 ms, then `ff 00` | no retry; no segment lock; position up to 255 reported |
+| `wifi-pwrseq` | `pwrseq_q2.c`, whole | the MMC power sequence is published only after aldo1, bldo1 and bldo2 are acquired, over 4096 generated arrival orders; a DT without one of the supply properties, an allocation failure, a supply error and a registration failure leave nothing published | published without acquiring the supplies; missing supply property accepted |
+| `backlight` | the production DT's backlight node; `pwm_bl.c` `compute_duty_cycle`; `pwm-ingenic-x2000.c` apply, program, state readback and clock accounting | 101 distinct DT levels from 0 through 16 to 255 on channel 0 with a 100 µs period; every percentage requests a higher duty than the one below and 100 % requests the full period; on all 16 channels at two clock rates each request programs high and low phases that add up to the period, with one low clock at full duty (DISPLAY-003), and keeps the other channels' bits in the shared registers; prescalers 0 to 14; disable; out-of-range periods, a busy channel, running DMA, inverted polarity and a clock error change no register | zero low phase at full duty; other channels' prescalers cleared |
+
+`x2000_pwm_program` shifts the signed constant `0xf` into bit 31 for channels 7
+and 15. GCC defines the result, as the kernel build relies on, so the
+`backlight` harness builds without UBSan's shift-base check.
+
 ## The fault kernel
 
 `os/kernel_faults.py build` compiles the `linux_production` commit and

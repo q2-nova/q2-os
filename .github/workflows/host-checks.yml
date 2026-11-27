@@ -38,6 +38,7 @@ jobs:
           python3 os/install/test_portal_artifact.py
           python3 os/install/test_portal_capport_hook.py
           python3 os/test_kernel_faults.py
+          python3 os/test_driver_functions.py
           python3 os/compose_ci.py --help
           python3 os/install/kernel_base.py --help
       - name: Compile and inspect the native platform bridge
