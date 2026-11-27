@@ -36,6 +36,7 @@ jobs:
           python3 os/test_timezone_data.py
           python3 os/test_usb_runtime.py
           python3 os/install/test_packaging_profile.py
+          python3 os/install/test_overlay.py
           python3 os/test_sdk_release.py
           python3 os/install/test_tsrs_artifact.py
           python3 os/install/test_portal_artifact.py

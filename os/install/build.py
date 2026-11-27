@@ -39,6 +39,18 @@ def run(args, **kw):
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
+OVERLAY = ROOT / 'os/overlay'
+
+def apply_overlay(root):
+    """Install this checkout's os/overlay over a copied Buildroot target.
+
+    Buildroot applies the overlay only when it builds the target, so a target
+    built at an earlier commit carries that commit's service scripts. The
+    post-build script writes no overlay path, so a second copy here gives the
+    files a fresh Buildroot build would install.
+    """
+    shutil.copytree(OVERLAY, root, dirs_exist_ok=True, symlinks=True)
+
 import bluetooth_firmware as bt_firmware
 BLUETOOTH_FIRMWARE = bt_firmware.FILES
 
@@ -185,6 +197,7 @@ def main():
     source_record = LOCK['linux_production']
     root = out / 'root'
     shutil.copytree(a.buildroot_target, root, symlinks=True)
+    apply_overlay(root)
     for name in SUPPORT_DIRS:
         (root / name).mkdir(parents=True, exist_ok=True)
     copy(HW / 'usb', root / 'sbin/q2-diagnostic-usb', 0o755)

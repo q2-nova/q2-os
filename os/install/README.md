@@ -38,6 +38,11 @@ python3 os/install/build.py \
   --output build/os/install-candidate
 ```
 
+The builder copies this checkout's `os/overlay` over the Buildroot target.
+Buildroot applies the overlay only when it builds the target, so without the
+copy a target built at an earlier commit would install that commit's service
+scripts.
+
 `--app` takes `q2nd` from a q2-player paired build, the output directory
 of q2-player `tools/build-target.py`. Keep the neighboring `q2-portal` binary and
 both symbol receipts in their original layout. The installer binds the player
