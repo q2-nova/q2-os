@@ -173,11 +173,20 @@ suspend_system() {
     local_storage || fail 'storage ownership changed during preparation'
     sync || fail 'storage sync failed'
     network_suspend || fail 'network suspend notification failed'
+    if [ "${Q2_RETAIN_DRM_FOR_PM:-0}" = 1 ] && [ -e "$drm_resume" ]; then
+        async_display=1
+        printf '1\n' > "$drm_resume" || fail 'display restore could not be armed'
+    fi
     # Wakeup-count handshake rejects a wake event racing final preparation.
     number "$SYS/power/wakeup_count" || fail 'wakeup counter unavailable'
     printf '%s\n' "$value" > "$SYS/power/wakeup_count" || fail 'wake event raced preparation'
     echo suspending > "$RUN/sleep-status"
     kernel_suspend || fail 'kernel refused suspend'
+    # The app may prepare dark state now; first presentation still waits for
+    # this helper to prove a retained return and join the display restore.
+    if [ "${Q2_NOTIFY_KERNEL_RETURN:-0}" = 1 ]; then
+        printf 'Q2_KERNEL_RETURN\n'
+    fi
     network_resume || fail 'network resume notification failed'
     read_value "$PROC/sys/kernel/random/boot_id" && [ "$value" = "$boot" ] || fail 'boot identity changed'
     number "$SYS/power/suspend_stats/success" && [ "$value" -gt "$success" ] || fail 'kernel did not complete suspend'
@@ -186,7 +195,7 @@ suspend_system() {
     verify_proof
     local_storage || fail 'storage ownership was not restored'
     read_value "$SYS/class/power_supply/axp20x-battery/charge_behaviour" && [ "$value" = "$charge" ] || fail 'charge inhibition changed across suspend'
-    echo resumed > "$RUN/sleep-status"
+    [ "$async_display" = 1 ] || echo resumed > "$RUN/sleep-status"
 }
 main() {
     [ "$#" = 0 ] || fail 'usage: q2-system-sleep'
@@ -197,12 +206,22 @@ main() {
     supervision=0
     network=0
     wlan_notified=0
+    async_display=0
+    drm_resume="$SYS/class/drm/card0/device/q2_async_resume"
     cleanup() {
         result=$?
         trap - EXIT HUP INT TERM
         if ! network_resume; then result=1; fi
         if [ "$supervision" = 1 ]; then
             "$SUPERVISOR" start || result=1
+        fi
+        if [ "$async_display" = 1 ]; then
+            if ! read_value "$drm_resume" || [ "$value" != ready ]; then
+                echo 'q2-system-sleep: display restore did not complete' >&2
+                result=1
+            fi
+            if ! printf '0\n' > "$drm_resume"; then result=1; fi
+            [ "$result" != 0 ] || echo resumed > "$RUN/sleep-status"
         fi
         [ "$result" = 0 ] || echo failed > "$RUN/sleep-status"
         [ "$control" = 0 ] || rmdir "$APP/control.lock"

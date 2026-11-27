@@ -48,13 +48,25 @@ class SleepTest(unittest.TestCase):
                             'sys/kernel/q2_suspend/proof': proof()}.items():
             (self.root / path).write_text(value + '\n')
         supervisor = self.root / 'supervisor'
-        supervisor.write_text('#!/bin/sh\necho "supervisor $1" >> "$FIXTURE/events"\n[ "$FAIL" != "$1" ]\n')
+        supervisor.write_text("""#!/bin/sh
+echo "supervisor $1" >> "$FIXTURE/events"
+drm_resume="$FIXTURE/sys/class/drm/card0/device/q2_async_resume"
+if [ "$1" = start ] && [ -f "$drm_resume" ] && [ "$(cat "$drm_resume")" = 1 ]; then
+    echo "display joined after supervisor" >> "$FIXTURE/events"
+    if [ "$FAIL" = display ]; then
+        echo error > "$drm_resume"
+    else
+        echo ready > "$drm_resume"
+    fi
+fi
+[ "$FAIL" != "$1" ]
+""")
         supervisor.chmod(0o755)
 
     def tearDown(self):
         shutil.rmtree(self.root)
 
-    def run_helper(self, fault='', proof_after=None):
+    def run_helper(self, fault='', proof_after=None, retained_drm=False, notice=False):
         if proof_after is None: proof_after=returned()
         script = f'Q2_SLEEP_SOURCE_ONLY=1\n. "{HELPER}"\n' + '''
 RUN=$FIXTURE/run
@@ -79,6 +91,9 @@ wpa_command() {
 }
 kernel_suspend() {
     echo mem >> "$FIXTURE/events"
+    if [ -f "$drm_resume" ] && [ "$(cat "$drm_resume")" = 1 ]; then
+        echo armed >> "$FIXTURE/events"
+    fi
     [ "$FAIL" != mem ] || return 1
     [ "$FAIL" = no-cycle ] || echo 5 > "$SYS/power/suspend_stats/success"
     case "$FAIL" in
@@ -96,7 +111,9 @@ kernel_suspend() {
 main
 '''
         result = subprocess.run(['sh', '-c', script], capture_output=True, text=True,
-                                env=dict(os.environ, FIXTURE=str(self.root), FAIL=fault, PROOF_AFTER=proof_after), timeout=5)
+                                env=dict(os.environ, FIXTURE=str(self.root), FAIL=fault, PROOF_AFTER=proof_after,
+                                         Q2_RETAIN_DRM_FOR_PM=str(int(retained_drm)),
+                                         Q2_NOTIFY_KERNEL_RETURN=str(int(notice))), timeout=5)
         events = self.root / 'events'
         return result, events.read_text().splitlines() if events.exists() else []
 
@@ -107,6 +124,30 @@ main
         self.assertEqual((self.root / 'run/sleep-status').read_text(), 'resumed\n')
         self.assertFalse((self.root / 'run/usb-storage.lock').exists())
         self.assertFalse((self.root / 'app/control.lock').exists())
+
+    def test_retained_drm_joins_after_supervision_and_disarms_on_errors(self):
+        for fault in ('', 'display', 'mem', 'start'):
+            with self.subTest(fault=fault):
+                self.tearDown()
+                self.setUp()
+                drm_resume = self.root / 'sys/class/drm/card0/device/q2_async_resume'
+                drm_resume.parent.mkdir(parents=True)
+                drm_resume.write_text('ready\n')
+                result, events = self.run_helper(fault, retained_drm=True, notice=True)
+                self.assertEqual(events, ['supervisor stop', 'sync', 'mem', 'armed',
+                                          'supervisor start', 'display joined after supervisor'])
+                self.assertEqual(drm_resume.read_text(), '0\n')
+                self.assertEqual(result.returncode == 0, not fault, result.stderr)
+                expected = 'failed\n' if fault else 'resumed\n'
+                self.assertEqual((self.root / 'run/sleep-status').read_text(), expected)
+                self.assertEqual(result.stdout, '' if fault == 'mem' else 'Q2_KERNEL_RETURN\n')
+                self.assertFalse((self.root / 'app/control.lock').exists())
+
+    def test_retained_drm_with_no_kernel_support_uses_original_sleep(self):
+        result, events = self.run_helper(retained_drm=True, notice=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'Q2_KERNEL_RETURN\n')
+        self.assertEqual(events, ['supervisor stop', 'sync', 'mem', 'supervisor start'])
 
     def test_every_kernel_resume_and_preparation_fault_unwinds_supervision(self):
         for fault in ('stop', 'sync', 'mem', 'no-cycle', 'resume-fail', 'resume-missing', 'resume-extra-line', 'reboot', 'charge', 'start', 'failed_resume', 'failed_resume_early', 'failed_resume_noirq'):
