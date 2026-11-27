@@ -17,6 +17,7 @@ from hardware.package import uimage
 from ssh_provision import InstalledSsh
 import sdk_platform
 import sdk_release
+from install import stock_regdb
 from install.kernel_build import build_kernel, build_kernel_container, copy, prepare_rescue
 
 COPIED = ('xImage', 'rescue.cpio', 'shanling-q2.dtb', 'linux.config')
@@ -70,7 +71,13 @@ def install_base(bundle, out, root, target, commit, *, platform_assets=None, sto
     identity = verify_base(bundle, platform, stock_wifi=stock_wifi)
     # The supplied target must yield the same keyless rescue inputs.
     check = out / 'rescue-input-check.cpio'
-    prepare_rescue(target, out / 'rescue-input-check', check, InstalledSsh(None, None, None, None))
+    regdb = stock_regdb.read() if stock_wifi else None
+    if regdb is not None:
+        if identity.get('regulatory_database') != stock_regdb.record(regdb):
+            raise ValueError('stock kernel kit requires the current signed regulatory database')
+        stock_regdb.install(root, regdb)
+    prepare_rescue(target, out / 'rescue-input-check', check,
+                   InstalledSsh(None, None, None, None), regdb=regdb)
     if sha(check) != identity['artifacts']['rescue.cpio']['sha256']:
         raise ValueError('Buildroot target differs from the prebuilt rescue inputs')
     for name in COPIED:
@@ -106,7 +113,8 @@ def produce(bundle, platform_dir, output, *, stock_wifi=False):
     run([sys.executable, OS / 'install/prepare.py', '--dest', source])
     container = build_kernel_container()
     ssh = InstalledSsh(None, None, None, None)
-    prepare_rescue(target, output / 'rescue', output / 'rescue.cpio', ssh)
+    regdb = stock_regdb.read() if stock_wifi else None
+    prepare_rescue(target, output / 'rescue', output / 'rescue.cpio', ssh, regdb=regdb)
     driver_inputs = stock_driver_inputs() if stock_wifi else None
     release, modules, config = build_kernel(source, output, output / 'module-stage', hardware=stock_wifi)
     copy(config, output / 'linux.config')
@@ -118,6 +126,7 @@ def produce(bundle, platform_dir, output, *, stock_wifi=False):
     if stock_wifi:
         record['stock_wifi'] = True
         record['stock_driver_inputs'] = driver_inputs
+        record['regulatory_database'] = stock_regdb.record(regdb)
     (output / MANIFEST).write_text(json.dumps(record, indent=2) + '\n')
     return verify_base(output, platform, stock_wifi=stock_wifi)
 

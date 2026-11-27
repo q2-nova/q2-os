@@ -7,6 +7,7 @@ import tempfile
 
 from build import LOCK, ROOT, WORK, run, sha
 from fork_checkout import verify
+from install import stock_regdb
 
 HERE = Path(__file__).resolve().parent
 HW = ROOT / 'os/hardware'
@@ -33,7 +34,7 @@ def copy(source, target, mode=None):
         target.chmod(mode)
 
 
-def prepare_rescue(target, rescue, output, ssh):
+def prepare_rescue(target, rescue, output, ssh, *, regdb=None):
     for name in SUPPORT_DIRS:
         (rescue / name).mkdir(parents=True, exist_ok=True)
     for name in ('bin/busybox', 'usr/sbin/dropbear', 'lib/libc.so.6',
@@ -46,6 +47,8 @@ def prepare_rescue(target, rescue, output, ssh):
     copy(HW / 'usb', rescue / 'sbin/q2-diagnostic-usb', 0o755)
     ssh.stage(rescue)
     copy(HERE / 'diagnostic-ssh', rescue / 'sbin/q2-diagnostic-ssh', 0o755)
+    if regdb is not None:
+        stock_regdb.install(rescue, regdb)
     epoch = LOCK['source_date_epoch']
     paths = sorted(rescue.rglob('*'))
     for path in (rescue, *paths):

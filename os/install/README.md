@@ -241,3 +241,11 @@ This candidate still requires stock recovery and first-install hardware
 qualification. The stock route omits the vendor Bluetooth payload. Review
 the embedded Wi-Fi firmware's redistribution terms, corresponding sources
 and third-party notices before distributing an image.
+
+The stock kit also places the Buildroot-pinned ISC wireless regulatory
+database and its detached kernel signature in the rescue and installed
+roots. It retains the upstream license and leaves country selection to the
+normal regulatory policy. A kit made without these files must be prepared
+again. For later app builds, keep the selected q2-os Release assets pinned
+and pass the same verified kit to `compose_stock.py image`. The kit is a
+local input pending review of the Wi-Fi firmware's redistribution terms.

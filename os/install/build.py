@@ -285,6 +285,9 @@ def main():
                 'portal_phone_radio': portal_radio,
                 'modules': {str(p.relative_to(root)): sha(p) for p in modroot.rglob('*.ko')},
                 'diagnostic_ssh': ssh.receipt}
+    if stock_base:
+        manifest['regulatory_database'] = json.loads(
+            (a.kernel_base / 'kernel-base.json').read_text())['regulatory_database']
     if startup:
         if startup_read_ahead.admit(startup_profile, installed_app, compression['block']) != startup:
             raise ValueError('startup read-ahead inputs changed during packing')
