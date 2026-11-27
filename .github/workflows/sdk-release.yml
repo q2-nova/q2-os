@@ -50,10 +50,11 @@ jobs:
       - name: Test relocation and ABI and freeze qualified bytes
         run: |
           python3 os/test_sdk.py
+          image_id="$(podman image inspect q2-os-build --format '{{.Id}}')"
           python3 os/sdk_release.py freeze \
             --archive build/os/out/images/mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz \
             --report build/os/sdk-test.json --config build/os/out/.config \
-            --container "$(podman image inspect q2-os-build --format '{{.Id}}')" \
+            --container "sha256:${image_id#sha256:}" \
             --out build/qualified-sdk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
