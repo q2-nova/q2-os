@@ -10,8 +10,11 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser(description=__doc__)
-p.add_argument('--binary', type=Path, default=ROOT / 'target/debug/q2nd')
+p.add_argument('--binary', type=Path, required=True,
+               help='host q2nd from a q2-player checkout (cargo build -p q2nd), e.g. Q2_PLAYER/target/debug/q2nd')
 a = p.parse_args()
+if not a.binary.is_file():
+    p.error(f'{a.binary}: no host q2nd; build it in a q2-player checkout')
 out = ROOT / 'build/os/appliance' / ('shutdown-' + uuid.uuid4().hex[:8])
 out.mkdir(parents=True)
 (out / 'config.toml').write_text('''# Generated fixture; no owner configuration.
