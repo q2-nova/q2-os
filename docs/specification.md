@@ -76,7 +76,3 @@ These IDs share a family with OS IDs or are cited here.
 | TEXT-002 | q2-player |
 | UPDATE-002 | q2-player |
 | USB-AUDIO-002 | q2-player |
-| SDHCI-002 | q2-factory `projects/kernel` |
-| WIFI-003 | q2-factory `projects/kernel` |
-| WIFI-004 | q2-factory `projects/kernel` |
-| WIFI-005 | q2-factory `projects/kernel` |

@@ -191,8 +191,7 @@ an independently generated skip-bad writer, plus capacity/overflow/scan errors.
 The container sanitizer run also passed. Kernel build checks are separate.
 
 `test_boot.py` boots a sanitized full-chip NAND fixture (`--base-nand`: the
-bootloader with erased identity, selector and userdata, as the q2-factory
-emulator flash builder makes it). It inserts the candidate at the real
+bootloader with erased identity, selector and userdata). It inserts the candidate at the real
 offsets, boots the real SPL, and checks protected byte hashes.
 `--bad-blocks 0,2,7` marks OOB bad blocks and writes root data around them.
 `--corrupt-root` checks the rescue path. Generated `--key` and
