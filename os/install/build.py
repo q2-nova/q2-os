@@ -79,15 +79,17 @@ def main():
     kernel.add_argument('--kernel-base', type=Path, help='tagged keyless kernel and matched release assets')
     p.add_argument('--kernel-platform-assets', type=Path, help='tagged SDK/platform inputs for a keyless stock kernel kit')
     p.add_argument('--buildroot-target', type=Path, required=True)
-    p.add_argument('--authorized-key', type=Path, help='personal image only: client public key outside Git')
-    p.add_argument('--host-key', type=Path, help='override the personal image’s generated host identity with an external Dropbear private key')
+    p.add_argument('--authorized-key', type=Path, help='client public key outside Git: a personal image, or a generated '
+                   'key for test_boot.py guest SSH with --qemu-fixture')
+    p.add_argument('--host-key', type=Path, help='override the generated host identity with an external Dropbear private key')
     p.add_argument('--qemu-user', type=Path, default=ROOT / 'build/qemu/qemu-mipsel-static',
                    help='QEMU user-mode binary for host key generation and validation with target Dropbear')
     p.add_argument('--app', type=Path, required=True, help='q2nd from a paired q2nd/q2-portal target build')
     p.add_argument('--player-source', type=Path, required=True, help='clean player checkout matching the paired artifact receipt')
     p.add_argument('--platform-library', type=Path, help='defaults to the Buildroot target libq2platform.so')
     p.add_argument('--wifi-tools', type=Path, help='required for installed hardware Wi-Fi, omitted in QEMU fixture')
-    p.add_argument('--qemu-fixture', action='store_true', help='keyless local QEMU package with no hardware Wi-Fi or Bluetooth payload')
+    p.add_argument('--qemu-fixture', action='store_true', help='local QEMU package with no hardware Wi-Fi or Bluetooth payload, '
+                   'keyless unless --authorized-key')
     p.add_argument('--tailscale', choices=TAILSCALE_DAEMONS, default='rs',
                    help='the one Tailscale daemon the image ships: rs (tailscale-rs, the default; needs --tsrsd) '
                         'or go (the Go tailscaled and CLI; needs --tailscale-dir)')
@@ -113,8 +115,8 @@ def main():
         ssh = InstalledSsh(a.authorized_key, a.host_key, a.buildroot_target, a.qemu_user)
     except ValueError as error:
         p.error(str(error))
-    if a.qemu_fixture and (a.authorized_key or a.wifi_tools or a.bluetooth_firmware or a.integration_overlay):
-        p.error('--qemu-fixture uses keyless USB diagnostics and the maintained local service overlay, with no hardware radio payload or emulator shell')
+    if a.qemu_fixture and (a.wifi_tools or a.bluetooth_firmware or a.integration_overlay):
+        p.error('--qemu-fixture uses the maintained local service overlay, with no hardware radio payload or emulator shell')
     stock_base = a.kernel_base is not None and not a.qemu_fixture
     if stock_base and (a.kernel_platform_assets is None or a.authorized_key or a.bluetooth_firmware):
         p.error('a stock kernel kit requires matching platform assets and keyless, Wi-Fi-only inputs')

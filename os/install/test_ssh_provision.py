@@ -200,6 +200,19 @@ class Provision(unittest.TestCase):
         self.assertNotIn(str(key), result.stderr)
         self.assertNotIn(key.read_text().split()[1], result.stderr)
 
+    def test_qemu_fixture_accepts_generated_key(self):
+        key = self.client('fixture')
+        common = [sys.executable, HERE / 'build.py', '--qemu-fixture', '--authorized-key', key,
+                  '--buildroot-target', self.target, '--qemu-user', self.runner, '--kernel-source', 'unused',
+                  '--player-source', 'unused', '--app', 'unused']
+        result = subprocess.run(common, text=True, capture_output=True)
+        # The key and the fixture pass admission; the next refusal is the missing daemon.
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--tailscale rs (the default) needs --tsrsd', result.stderr)
+        result = subprocess.run([*common, '--wifi-tools', 'unused'], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--qemu-fixture uses the maintained local service overlay', result.stderr)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)

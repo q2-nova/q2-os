@@ -70,7 +70,11 @@ instead to package the Go daemon and CLI from their existing staged directory.
 For a local QEMU candidate, pass `--qemu-fixture` instead of
 `--wifi-tools` and `--integration-overlay`. This selects the versioned service
 overlay, omits hardware radio firmware and modules, leaves SSH disabled and
-uses the production kernel and DTB. The local test harness uses QEMU direct
+uses the production kernel and DTB. `--authorized-key` with a generated client
+public key, and optionally `--host-key` with a generated Dropbear host key,
+enables USB SSH in the fixture. `test_boot.py --key --host-public-key` needs
+it for guest SSH, guest scripts and `--measure-deep-wake`. Keep both keys
+outside Git worktrees. The local test harness uses QEMU direct
 kernel boot and synthetic NAND with the packed root placed at the normal
 offset. A generated UBI `user_data` volume permits player startup. The
 fixture reports `Q2_SIM_PLAYER_READY` on the serial console after its
