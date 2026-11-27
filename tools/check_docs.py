@@ -5,9 +5,9 @@ Every relative link must reach a tracked file, and an anchor must name a
 heading in the target. Links listed in tools/doc-links-pending.txt point at
 documents that are not ported yet; they are allowed until the target exists.
 
-The hardware references (docs/hardware.md, docs/boot-chain.md,
-docs/stock-firmware.md) must give every table row a source and a level,
-and must carry no dates.
+The hardware and system references (REFERENCES below) must give every
+table row a source and a level, and must carry no dates, process narration
+or references to people.
 """
 import pathlib
 import re
@@ -17,12 +17,16 @@ import unicodedata
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PENDING = ROOT / 'tools' / 'doc-links-pending.txt'
-REFERENCES = ('docs/hardware.md', 'docs/boot-chain.md', 'docs/stock-firmware.md')
+REFERENCES = ('docs/hardware.md', 'docs/boot-chain.md', 'docs/stock-firmware.md',
+              'docs/bluetooth.md', 'docs/network-time.md', 'docs/system-sleep.md',
+              'docs/usb-host.md', 'docs/usb-storage.md', 'docs/wifi-security.md',
+              'os/hardware/PLAYER.md')
 LEVELS = ('device-verified', 'emulator', 'datasheet', 'vendor source',
-          'stock firmware', 'unverified')
+          'stock firmware', 'host', 'unverified')
 LINK = re.compile(r'(?<!!)\[[^\]]*\]\(([^)\s]+)\)')
 DATE = re.compile(r'\b(19|20)\d\d-\d\d-\d\d\b|\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? (19|20)\d\d\b')
 NARRATION = re.compile(r'(?i)\brecorded in `?[0-9a-f]{7,}|\bthe agent\b|\bagent (infers|implementation)')
+PEOPLE = re.compile(r"(?i)\b(device owner|the owner|owner's)\b|\b(he|she|his|her|him)\b")
 
 
 def tracked_markdown():
@@ -105,6 +109,8 @@ def check_reference(name):
             errors.append(f'{name}:{number}: date')
         if NARRATION.search(line):
             errors.append(f'{name}:{number}: process narration')
+        if PEOPLE.search(line):
+            errors.append(f'{name}:{number}: reference to a person')
         if not line.startswith('|'):
             header = None
             continue
