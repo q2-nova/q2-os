@@ -8,6 +8,12 @@ documents that are not ported yet; they are allowed until the target exists.
 The hardware and system references (REFERENCES below) must give every
 table row a source and a level, and must carry no dates, process narration
 or references to people.
+
+docs/specification.md must define each requirement ID once, in a table row
+with a requirement and an acceptance, and must carry no dates, release
+numbers or references to people. A table headed ID | Repository names IDs
+that another repository's specification defines. Every ID of a
+specification family cited in the repository must be defined there.
 """
 import pathlib
 import re
@@ -27,6 +33,11 @@ LINK = re.compile(r'(?<!!)\[[^\]]*\]\(([^)\s]+)\)')
 DATE = re.compile(r'\b(19|20)\d\d-\d\d-\d\d\b|\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? (19|20)\d\d\b')
 NARRATION = re.compile(r'(?i)\brecorded in `?[0-9a-f]{7,}|\bthe agent\b|\bagent (infers|implementation)')
 PEOPLE = re.compile(r"(?i)\b(device owner|the owner|owner's)\b|\b(he|she|his|her|him)\b")
+SPEC = 'docs/specification.md'
+RELEASE = re.compile(r'\bV\d+\.\d+\b')
+SPEC_PEOPLE = re.compile(r"(?i)\b(device owner|the owner|owner's|requested by|product feedback)\b|\b(he|she|his|her|him)\b")
+ID = re.compile(r'\b([A-Z][A-Z]*(?:-[A-Z]+)*)-(\d{3})\b')
+ROW_ID = re.compile(r'[A-Z][A-Z]*(?:-[A-Z]+)*-\d{3}')
 
 
 def tracked_markdown():
@@ -128,6 +139,79 @@ def check_reference(name):
     return errors
 
 
+def table_rows(text):
+    """Yield (line number, header, cells) for every table body row."""
+    header = None
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.startswith('|'):
+            header = None
+            continue
+        cells = [c.strip() for c in re.split(r'(?<!\\)\|', line.strip())[1:-1]]
+        if header is None:
+            header = [c.lower() for c in cells]
+            continue
+        if all(re.fullmatch(r':?-+:?', c) for c in cells):
+            continue
+        yield number, header, cells
+
+
+def check_specification(name, text):
+    """Return (errors, defined IDs) for a specification document."""
+    errors, defined = [], {}
+    for number, line in enumerate(text.splitlines(), 1):
+        if DATE.search(line):
+            errors.append(f'{name}:{number}: date')
+        if RELEASE.search(line):
+            errors.append(f'{name}:{number}: release number')
+        if SPEC_PEOPLE.search(line):
+            errors.append(f'{name}:{number}: reference to a person')
+    for number, header, cells in table_rows(text):
+        if header == ['id', 'repository']:
+            rid = cells[0] if cells else ''
+            if not ROW_ID.fullmatch(rid) or len(cells) < 2 or not cells[1]:
+                errors.append(f'{name}:{number}: an external ID row needs an ID and a repository')
+            elif rid in defined:
+                errors.append(f'{name}:{number}: {rid} is also defined on line {defined[rid]}')
+            else:
+                defined[rid] = number
+            continue
+        if header[:3] != ['id', 'requirement', 'acceptance']:
+            errors.append(f'{name}:{number}: table header must start with ID | Requirement | Acceptance')
+            continue
+        row = dict(zip(header, cells))
+        rid = row.get('id', '')
+        if not ROW_ID.fullmatch(rid):
+            errors.append(f'{name}:{number}: {rid!r} is not a requirement ID')
+            continue
+        if rid in defined:
+            errors.append(f'{name}:{number}: {rid} is also defined on line {defined[rid]}')
+        defined.setdefault(rid, number)
+        if not row.get('requirement'):
+            errors.append(f'{name}:{number}: {rid} has no requirement')
+        if not row.get('acceptance'):
+            errors.append(f'{name}:{number}: {rid} has no acceptance')
+    return errors, defined
+
+
+def check_citations(defined, files):
+    """Every cited ID of a defined family must be defined."""
+    families = {rid.rsplit('-', 1)[0] for rid in defined}
+    errors = []
+    for name in files:
+        if name == SPEC:
+            continue
+        try:
+            text = (ROOT / name).read_text(encoding='utf-8')
+        except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            for m in ID.finditer(line):
+                rid = m.group(0)
+                if m.group(1) in families and rid not in defined:
+                    errors.append(f'{name}:{number}: {rid} is not in {SPEC}')
+    return errors
+
+
 def main():
     pending = set()
     if PENDING.exists():
@@ -137,6 +221,10 @@ def main():
     errors = check_links(tracked_markdown(), pending)
     for name in REFERENCES:
         errors += check_reference(name)
+    spec_errors, defined = check_specification(SPEC, (ROOT / SPEC).read_text(encoding='utf-8'))
+    errors += spec_errors
+    errors += check_citations(defined, subprocess.check_output(
+        ['git', '-C', str(ROOT), 'ls-files', '--cached', '--others', '--exclude-standard'], text=True).splitlines())
     for error in errors:
         print(error, file=sys.stderr)
     return 1 if errors else 0

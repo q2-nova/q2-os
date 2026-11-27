@@ -11,6 +11,9 @@ guide](#build-and-test-the-sdk). The [releases
 page](https://github.com/q2-nova/q2-os/releases) hosts component prereleases for
 developers. A stock-device first-install download is still in development.
 
+The [specification](docs/specification.md) lists what the system must do,
+and the [changelog](CHANGELOG.md) records completed work.
+
 ## Build and test the SDK
 
 On a Linux host with Python 3, Git, Podman and network access, run:
