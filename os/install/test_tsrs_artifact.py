@@ -59,6 +59,17 @@ class StandaloneDaemon(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source_commit differs'):
             tsrs_artifact.admit(self.bundle)
 
+    def test_selected_release_source_keeps_upstream_and_patch_pins(self):
+        chosen = 'b' * 40
+        self.record['source_commit'] = chosen
+        self.write_record()
+        _, admission = tsrs_artifact.admit(self.bundle, chosen)
+        self.assertEqual(admission['source_commit'], chosen)
+        self.record['patch_sha256'] = '0' * 64
+        self.write_record()
+        with self.assertRaisesRegex(ValueError, 'patch_sha256 differs'):
+            tsrs_artifact.admit(self.bundle, chosen)
+
     def test_wrong_recipient_despite_matching_digest(self):
         wrong = self.binary[:18] + b'\x03\x00' + self.binary[20:]
         (self.bundle / 'tsrsd').write_bytes(wrong)

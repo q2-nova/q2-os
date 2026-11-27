@@ -25,6 +25,7 @@
   },
   "qemu_installed": {
     "commit": "8e082e052da25320cccd7356e0a441b863b38879",
-    "url": "https://github.com/q2-nova/qemu.git"
+    "url": "https://github.com/q2-nova/qemu.git",
+    "containerfile_sha256": "30ecf7c320a6e06d5b57e1da42245db594304c6f42df74e11e2eebcbbbca490d"
   }
 }

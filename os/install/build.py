@@ -94,6 +94,7 @@ def main():
                    help='the one Tailscale daemon the image ships: rs (tailscale-rs, the default; needs --tsrsd) '
                         'or go (the Go tailscaled and CLI; needs --tailscale-dir)')
     p.add_argument('--tsrsd', type=Path, help='standalone tsrs Q2 build output directory (see os/install/README.md)')
+    p.add_argument('--tsrs-source', type=Path, help='clean checkout of the selected tsrs release tag')
     p.add_argument('--tailscale-dir', type=Path, help='--tailscale go: staged tailscale and tailscaled binaries with TAILSCALE.json')
     p.add_argument('--integration-overlay', type=Path, help='generated installed service/config integration overlay')
     p.add_argument('--x2000-c', type=Path,
@@ -123,7 +124,12 @@ def main():
     tsrsd = None
     if a.tailscale == 'rs':
         try:
-            tsrs_binary, tsrsd = tsrs_artifact.admit(a.tsrsd)
+            selected_tsrs = None
+            if a.tsrs_source is not None:
+                source = a.tsrs_source.resolve()
+                selected_tsrs = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
+                verify(source, selected_tsrs)
+            tsrs_binary, tsrsd = tsrs_artifact.admit(a.tsrsd, selected_tsrs)
         except (OSError, ValueError) as error:
             p.error(str(error))
     if a.packaging_profile == 'production' and a.strip_tool is None:

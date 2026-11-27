@@ -1,28 +1,39 @@
-# Buildroot SDK promotion and consumption
+# Buildroot SDK releases
 
-The manual OS host checks cover the external tree, artifact inputs and platform
-bridge. The SDK release workflow runs the host checks first.
+Pushing a signed `vX.Y.Z-rc.N` tag builds the SDK and matching Buildroot
+target from that commit. The workflow first qualifies SDK relocation, time64,
+MIPS ABI and the touchscreen bridge. It collects corresponding sources and
+notices, then uploads a draft, verifies GitHub's asset sizes and digests
+against local bytes and publishes the intact draft as a prerelease.
 
-1. Dispatch **SDK release** with `operation=validate` for a source-only
-   check. Pushing an `sdk-vX.Y.Z` tag runs the same checks and validates the tag.
-2. Select the trusted q2-os ref in a separate dispatch with
-   `operation=qualify`. The workflow builds the pinned Buildroot fork and runs
-   relocation, time64, ABI and platform bridge checks. It stores the archive,
-   resolved configuration, qualification report, exact source provenance and
-   checksums as one Actions artifact. Record the run ID.
-3. Before promotion, review the archive contents and Buildroot legal-info for
-   notices, corresponding source and redistribution terms. Cross-build and
-   exercise the downstream artifacts against that exact SDK. Create the
-   version tag at its qualified, signed q2-os commit.
-4. Dispatch `operation=promote` **on that tag**, with its name, the qualifying
-   run ID and redistribution review confirmation. Promotion verifies that the
-   successful manual qualification ran in this repository at the signed commit.
-   It checks the downloaded files and independently re-runs relocation and
-   ABI validation with read-only repository permissions. A separate job
-   verifies those exact bytes and creates a release draft with checksums.
-   Review the draft before publishing.
-5. The player and standalone cross-build consumers lock the promoted SDK's
-   q2-os and Buildroot commits and archive SHA-256. Verify the digest before
-   extraction, relocate into an empty directory and record the archive hash
-   in the consumer build receipt. Contributors can build and test the same
-   pinned SDK locally.
+A manual **SDK release** dispatch with `operation=validate` runs host checks.
+Selecting `qualify` builds the SDK and matching target as Actions artifacts.
+Manual dispatches do not create GitHub Releases.
+
+A downstream release locks the q2-os RC tag and verifies the Release asset
+digests and the checksum manifests before using the files. The prerelease
+contains:
+
+- `mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz`, `sdk-manifest.json`,
+  `sdk-test.json`, `buildroot.config`, and `SHA256SUMS`
+- `target.tar.gz` and `platform.json`, bound to the exact SDK and configuration
+- `buildroot-legal-info.tar.gz` with Buildroot and q2-os source and license data
+- `RELEASE-SHA256SUMS` covering the other files
+
+The player and standalone component repos use the SDK without depending on
+each other. After the player and standalone TSRS are built, the player
+release workflow can call the tagged q2-os checkout's composer:
+
+```sh
+python3 Q2_OS/os/compose_ci.py \
+  --assets VERIFIED_Q2_OS_RELEASE_FILES \
+  --player-source PAIRED_PLAYER_SOURCE --app PAIRED_ARTIFACTS/q2nd \
+  --tsrs-source SELECTED_TSRS_SOURCE --tsrsd VERIFIED_TSRS_ARTIFACTS \
+  --release-tag V0.01 --output Q2_OS/build/os/ci-installed-image
+```
+
+Use absolute paths with the command above. The composer builds the pinned
+production kernel, stages matching modules and emits a keyless QEMU
+candidate. It accepts the selected TSRS source checkout and verifies the
+daemon receipt against it and the pinned upstream TSRS inputs. The image is
+for generated local or CI QEMU testing.

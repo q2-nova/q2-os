@@ -1,6 +1,7 @@
 """Admit a standalone tsrs Q2 build without executing its checkout."""
 import hashlib
 import json
+import re
 from pathlib import Path
 
 PIN = Path(__file__).with_name('tsrs.json')
@@ -11,10 +12,14 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def admit(directory):
+def admit(directory, source_commit=None):
     """Return the verified daemon bytes and their installed-image provenance."""
     directory = directory.resolve()
     pin = json.loads(PIN.read_text())
+    if source_commit is not None:
+        if not re.fullmatch('[0-9a-f]{40}', source_commit):
+            raise ValueError('TSRS release checkout requires a full source commit')
+        pin['source_commit'] = source_commit
 
     def read(name):
         source = directory / name

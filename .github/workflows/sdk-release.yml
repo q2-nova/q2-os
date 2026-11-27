@@ -1,27 +1,17 @@
 name: SDK release
 on:
   push:
-    tags: ['sdk-v*']
+    tags: ['v*-rc.*']
   workflow_dispatch:
     inputs:
       operation:
-        description: Check inputs, qualify a new SDK, or draft an existing qualified SDK
+        description: Check source or qualify SDK inputs without publishing
         type: choice
-        options: [validate, qualify, promote]
+        options: [validate, qualify]
         default: validate
       source_commit:
         description: Optional full signed OS source commit for CI qualification
         type: string
-      release_tag:
-        description: Existing sdk-vX.Y.Z tag for promotion
-        type: string
-      qualification_run:
-        description: Successful qualify workflow run ID for promotion
-        type: string
-      redistribution_reviewed:
-        description: Notices, corresponding source and redistribution reviewed
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -29,15 +19,8 @@ permissions:
 jobs:
   host-checks:
     uses: ./.github/workflows/host-checks.yml
-  validate-tag:
-    if: github.event_name == 'push'
-    needs: host-checks
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check SDK tag syntax
-        run: '[[ "$GITHUB_REF_NAME" =~ ^sdk-v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
   qualify:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'qualify'
+    if: github.event_name == 'push' || inputs.operation == 'qualify'
     needs: host-checks
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -52,6 +35,10 @@ jobs:
           OS_COMMIT: ${{ inputs.source_commit || github.sha }}
         run: |
           [[ "$OS_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]]
+            [[ "$OS_COMMIT" == "$GITHUB_SHA" ]]
+          fi
           sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$OS_COMMIT" --jq 'if .commit.verification.verified then .sha else empty end')
           [[ "$sha" == "$OS_COMMIT" ]]
           printf 'commit=%s\n' "$sha" >> "$GITHUB_OUTPUT"
@@ -103,95 +90,82 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
-  verify-promotion:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'promote'
-    needs: host-checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      archive_sha256: ${{ steps.recheck.outputs.archive_sha256 }}
-      source_commit: ${{ steps.provenance.outputs.source_commit }}
-      artifact_id: ${{ steps.provenance.outputs.artifact_id }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Collect corresponding source and notices for the tagged release
+        if: github.event_name == 'push'
+        working-directory: runtime-source
+        run: |
+          python3 os/build.py build legal-info
+          legal=build/os/out/legal-info
+          test -s "$legal/manifest.csv"
+          test -s "$legal/host-manifest.csv"
+          git -C build/os/buildroot-2026.08.1 archive --format=tar.gz --prefix=buildroot/ HEAD > "$legal/buildroot-source.tar.gz"
+          git archive --format=tar.gz --prefix=q2-os/ HEAD > "$legal/q2-os-source.tar.gz"
+          tar -C build/os/out -czf build/os/buildroot-legal-info.tar.gz legal-info
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name == 'push'
         with:
-          persist-credentials: false
-      - name: Bind tag and qualifying run to this signed source
-        id: provenance
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SDK_TAG: ${{ inputs.release_tag }}
-          SDK_RUN: ${{ inputs.qualification_run }}
-          SDK_REVIEWED: ${{ inputs.redistribution_reviewed }}
-        run: |
-          [[ "$SDK_REVIEWED" == true ]]
-          [[ "$SDK_TAG" =~ ^sdk-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$SDK_RUN" =~ ^[0-9]+$ ]]
-          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SDK_TAG" --jq 'if .commit.verification.verified then .sha else empty end')
-          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$sha" == "$GITHUB_SHA" ]]
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SDK_RUN" > "$RUNNER_TEMP/sdk-run.json"
-          jq -e --arg sha "$sha" --arg repo "$GITHUB_REPOSITORY" '
-            .conclusion == "success" and .event == "workflow_dispatch" and
-            .path == ".github/workflows/sdk-release.yml" and .head_sha == $sha and
-            .head_repository.full_name == $repo' "$RUNNER_TEMP/sdk-run.json"
-          artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SDK_RUN/artifacts" --jq '
-            [.artifacts[] | select(.name == "q2-sdk-qualification" and .expired == false)] |
-            if length == 1 then .[0].id else empty end')
-          [[ "$artifact" =~ ^[0-9]+$ ]]
-          printf 'source_commit=%s\nartifact_id=%s\n' "$sha" "$artifact" >> "$GITHUB_OUTPUT"
-          gh run download "$SDK_RUN" --repo "$GITHUB_REPOSITORY" --name q2-sdk-qualification --dir build/qualified-sdk
-      - name: Verify and independently relocate the admitted archive
-        id: recheck
-        env:
-          SDK_COMMIT: ${{ steps.provenance.outputs.source_commit }}
-        run: |
-          python3 os/sdk_release.py verify --bundle build/qualified-sdk --os-commit "$SDK_COMMIT" > build/verified-sdk.json
-          python3 os/test_sdk.py --archive build/qualified-sdk/mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz --report build/rechecked-sdk.json
-          sha=$(jq -er '.archive_sha256' build/verified-sdk.json)
-          jq -e --arg sha "$sha" '.passed == true and .sdk_sha256 == $sha' build/rechecked-sdk.json
-          printf 'archive_sha256=%s\n' "$sha" >> "$GITHUB_OUTPUT"
-  draft:
-    needs: verify-promotion
+          name: q2-sdk-compliance
+          path: runtime-source/build/os/buildroot-legal-info.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+  publish-rc:
+    if: github.event_name == 'push'
+    needs: qualify
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    concurrency: sdk-draft-${{ inputs.release_tag }}
+    timeout-minutes: 45
+    concurrency: q2-os-rc-${{ github.ref_name }}
     permissions:
       contents: write
-      actions: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Download exact verified qualification and create a draft
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: q2-sdk-qualification
+          path: build/release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: q2-os-platform
+          path: build/release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: q2-sdk-compliance
+          path: build/release-assets
+      - name: Recheck the assets and publish a tagged SDK prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-          SDK_TAG: ${{ inputs.release_tag }}
-          SDK_ARTIFACT: ${{ needs.verify-promotion.outputs.artifact_id }}
-          SDK_COMMIT: ${{ needs.verify-promotion.outputs.source_commit }}
-          SDK_SHA256: ${{ needs.verify-promotion.outputs.archive_sha256 }}
         run: |
-          [[ "$SDK_TAG" =~ ^sdk-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$SDK_ARTIFACT" =~ ^[0-9]+$ ]]
-          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SDK_TAG" --jq 'if .commit.verification.verified then .sha else empty end')
-          [[ "$sha" == "$SDK_COMMIT" && "$sha" == "$GITHUB_SHA" ]]
-          mkdir -p build/qualified-sdk
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$SDK_ARTIFACT/zip" > build/sdk-bundle.zip
-          python3 - <<'PY'
+          python3 os/sdk_platform.py verify --os-commit "$GITHUB_SHA" \
+            --sdk-bundle build/release-assets --platform build/release-assets
+          cd build/release-assets
+          files=(mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz sdk-manifest.json sdk-test.json
+                 buildroot.config SHA256SUMS target.tar.gz platform.json buildroot-legal-info.tar.gz)
+          sha256sum "${files[@]}" > RELEASE-SHA256SUMS
+          files+=(RELEASE-SHA256SUMS)
+          printf 'Qualified Q2 SDK and matching userspace platform for %s.\n\nFor downstream cross-builds and QEMU integration.\n' "$GITHUB_SHA" > ../release-notes.md
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
+            --draft --prerelease --latest=false --verify-tag \
+            --title "Q2 OS $GITHUB_REF_NAME" --notes-file ../release-notes.md
+          release_id=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" > ../uploaded-assets.json
+          python3 - "${files[@]}" <<'PY'
+          import hashlib
+          import json
           from pathlib import Path
-          from zipfile import ZipFile
-          bundle = Path('build/qualified-sdk')
-          names = {'mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz', 'sdk-test.json',
-                   'buildroot.config', 'sdk-manifest.json', 'SHA256SUMS'}
-          with ZipFile('build/sdk-bundle.zip') as archive:
-              if set(archive.namelist()) != names or len(archive.namelist()) != len(names):
-                  raise ValueError('unexpected content in qualification bundle')
-              for name in names:
-                  archive.extract(name, bundle)
+          import sys
+
+          with Path('../uploaded-assets.json').open() as source:
+              remote = json.load(source)
+          names = sys.argv[1:]
+          if len(remote) != len(names) or {row['name'] for row in remote} != set(names):
+              raise SystemExit('uploaded prerelease draft has missing or unexpected files')
+          for row in remote:
+              local = Path(row['name'])
+              with local.open('rb') as stream:
+                  digest = 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest()
+              if row['size'] != local.stat().st_size or row['digest'] != digest:
+                  raise SystemExit('uploaded asset bytes differ from checked files')
           PY
-          python3 os/sdk_release.py verify --bundle build/qualified-sdk --os-commit "$SDK_COMMIT" --expected-archive "$SDK_SHA256"
-          printf 'Qualified Buildroot SDK for q2-os %s.\n\nArchive SHA-256: `%s`.\n' "$SDK_COMMIT" "$SDK_SHA256" > build/sdk-release-notes.md
-          gh release create "$SDK_TAG" build/qualified-sdk/* --repo "$GITHUB_REPOSITORY" \
-            --draft --verify-tag --title "Q2 SDK $SDK_TAG" --notes-file build/sdk-release-notes.md
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false

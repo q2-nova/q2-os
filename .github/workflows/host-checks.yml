@@ -30,6 +30,8 @@ jobs:
           python3 os/test_usb_runtime.py
           python3 os/install/test_packaging_profile.py
           python3 os/test_sdk_release.py
+          python3 os/install/test_tsrs_artifact.py
+          python3 os/compose_ci.py --help
       - name: Compile and inspect the native platform bridge
         run: |
           mkdir -p build/ci
