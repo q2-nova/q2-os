@@ -9,6 +9,9 @@ on:
         type: choice
         options: [validate, qualify, promote]
         default: validate
+      source_commit:
+        description: Optional full signed OS source commit for CI qualification
+        type: string
       release_tag:
         description: Existing sdk-vX.Y.Z tag for promotion
         type: string
@@ -42,12 +45,35 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Build the SDK from the source lock
+      - name: Resolve signed runtime sources
+        id: runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OS_COMMIT: ${{ inputs.source_commit || github.sha }}
+        run: |
+          [[ "$OS_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$OS_COMMIT" --jq 'if .commit.verification.verified then .sha else empty end')
+          [[ "$sha" == "$OS_COMMIT" ]]
+          printf 'commit=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.runtime.outputs.commit }}
+          path: runtime-source
+          persist-credentials: false
+      - name: Initialize the pinned OS build container and target
+        working-directory: runtime-source
         run: |
           command -v podman
           python3 os/build.py container
-          python3 os/build.py sdk
+          python3 os/build.py configure
+      - name: Compile the first Buildroot SDK dependency
+        working-directory: runtime-source
+        run: python3 os/build.py build host-cpio
+      - name: Build the complete SDK from the source lock
+        working-directory: runtime-source
+        run: python3 os/build.py sdk
       - name: Test relocation and ABI and freeze qualified bytes
+        working-directory: runtime-source
         run: |
           python3 os/test_sdk.py
           image_id="$(podman image inspect q2-os-build --format '{{.Id}}')"
@@ -56,10 +82,24 @@ jobs:
             --report build/os/sdk-test.json --config build/os/out/.config \
             --container "sha256:${image_id#sha256:}" \
             --out build/qualified-sdk
+      - name: Freeze installed userspace inputs for the same SDK
+        env:
+          OS_COMMIT: ${{ steps.runtime.outputs.commit }}
+        run: |
+          python3 os/sdk_platform.py freeze --os-commit "$OS_COMMIT" \
+            --sdk-bundle runtime-source/build/qualified-sdk --target runtime-source/build/os/out/target \
+            --platform runtime-source/build/qualified-platform
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: q2-sdk-qualification
-          path: build/qualified-sdk/
+          path: runtime-source/build/qualified-sdk/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: q2-os-platform
+          path: runtime-source/build/qualified-platform/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
