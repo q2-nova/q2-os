@@ -80,7 +80,11 @@ kernel_suspend() {
     echo mem >> "$FIXTURE/events"
     [ "$FAIL" != mem ] || return 1
     [ "$FAIL" = no-cycle ] || echo 5 > "$SYS/power/suspend_stats/success"
-    [ "$FAIL" != resume-fail ] || echo 1 > "$SYS/power/suspend_stats/fail"
+    case "$FAIL" in
+        resume-fail) echo 1 > "$SYS/power/suspend_stats/fail" ;;
+        resume-missing) rm "$SYS/power/suspend_stats/failed_resume" ;;
+        resume-extra-line) printf '0\n1\n' > "$SYS/power/suspend_stats/fail" ;;
+    esac
     case "$FAIL" in failed_resume*) echo 1 > "$SYS/power/suspend_stats/$FAIL" ;; esac
     [ "$FAIL" != reboot ] || echo other-boot > "$PROC/sys/kernel/random/boot_id"
     [ "$FAIL" != charge ] || echo '[auto] inhibit-charge' > "$SYS/class/power_supply/axp20x-battery/charge_behaviour"
@@ -104,7 +108,7 @@ main
         self.assertFalse((self.root / 'app/control.lock').exists())
 
     def test_every_kernel_resume_and_preparation_fault_unwinds_supervision(self):
-        for fault in ('stop', 'sync', 'mem', 'no-cycle', 'resume-fail', 'reboot', 'charge', 'start', 'failed_resume', 'failed_resume_early', 'failed_resume_noirq'):
+        for fault in ('stop', 'sync', 'mem', 'no-cycle', 'resume-fail', 'resume-missing', 'resume-extra-line', 'reboot', 'charge', 'start', 'failed_resume', 'failed_resume_early', 'failed_resume_noirq'):
             with self.subTest(fault=fault):
                 self.tearDown()
                 self.setUp()
