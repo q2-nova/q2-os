@@ -103,7 +103,7 @@ fi
 # Start the supplicant now when the player last wanted Wi-Fi (q2nd keeps
 # /state/network/autostart for Wi-Fi On without Offline Mode): association
 # overlaps the player's start, whose own `up` then returns at once. DHCP stays
-# with the player (docs/startup-ideas.md, 1b).
+# with the player.
 if [ "$peripherals_ready" = 1 ] && [ "$(cat /run/q2/state-status 2>/dev/null)" = ready ] &&
     [ -e /state/network/autostart ] && [ -x /usr/libexec/q2-network/wifi ]; then
     bootmark wifi-early-requested
