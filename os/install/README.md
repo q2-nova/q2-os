@@ -250,10 +250,9 @@ Stock images install the verified Bluetooth pair and
 `/usr/share/doc/q2-os/rtl8733bs-provenance.json`. The release manifest binds
 the installed file digests and upstream source. The project's GitHub stock
 firmware downloads have redistribution permission for this exact pair.
-Other firmware versions and the separate Wi-Fi payload require their own
-distribution review. Use `--without-bluetooth-firmware` only when preparing
-a kit that intentionally omits the pair. The SDK and emulator image retain
-their independent build paths.
+That permission covers only the two pinned files. Use
+`--without-bluetooth-firmware` when preparing a kit that omits the pair.
+The SDK and emulator image retain their independent build paths.
 
 The stock image still requires recovery and first-install hardware
 qualification.
@@ -277,8 +276,8 @@ database and its detached kernel signature in the rescue and installed
 roots. It retains the upstream license and leaves country selection to the
 normal regulatory policy. A kit made without these files must be prepared
 again. For later app builds, keep the selected q2-os Release assets pinned
-and pass the same verified kit to `compose_stock.py image`. The kit is a
-local input pending review of the Wi-Fi firmware's redistribution terms.
+and pass the same verified kit to `compose_stock.py image`. Keep the kit
+as a build input for reproducing the firmware and radio source archive.
 
 After composing the stock candidate, check both packed roots and the
 running kernel with the public QEMU executable. The test uses the kernel
