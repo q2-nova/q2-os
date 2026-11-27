@@ -1,8 +1,7 @@
 name: OS host checks
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,6 +29,7 @@ jobs:
           python3 os/test_timezone_data.py
           python3 os/test_usb_runtime.py
           python3 os/install/test_packaging_profile.py
+          python3 os/test_sdk_release.py
       - name: Compile and inspect the native platform bridge
         run: |
           mkdir -p build/ci
