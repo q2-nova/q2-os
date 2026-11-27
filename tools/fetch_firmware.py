@@ -101,14 +101,19 @@ def file_digest(path):
     return h.hexdigest()
 
 
-def download(url, target, expected, limit=ZIP_LIMIT, opener=urllib.request.urlopen):
-    """Download to target.part, check size and hash, then rename to target."""
+def open_firmware(url):
+    return urllib.request.urlopen(url, timeout=60)
+
+
+def download(url, target, expected, limit=ZIP_LIMIT, opener=open_firmware):
+    """Download to a temporary file, verify it, and atomically replace the cache entry."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    part = target.with_name(target.name + '.part')
+    fd, name = tempfile.mkstemp(prefix=target.name + '.', suffix='.part', dir=target.parent)
+    part = Path(name)
     h = hashlib.sha256()
     size = 0
     try:
-        with opener(url) as response, open(part, 'wb') as out:
+        with os.fdopen(fd, 'wb') as out, opener(url) as response:
             for block in iter(lambda: response.read(1 << 20), b''):
                 size += len(block)
                 if size > limit:
@@ -123,7 +128,7 @@ def download(url, target, expected, limit=ZIP_LIMIT, opener=urllib.request.urlop
     return target
 
 
-def obtain(source, cache, offline, local_zip=None, opener=urllib.request.urlopen):
+def obtain(source, cache, offline, local_zip=None, opener=open_firmware):
     """Path of a ZIP whose SHA-256 matches the source's pin."""
     pin = SOURCES[source]
     if local_zip is not None:
@@ -134,7 +139,8 @@ def obtain(source, cache, offline, local_zip=None, opener=urllib.request.urlopen
     if cached.is_file():
         if file_digest(cached) == pin['sha256']:
             return cached
-        raise FetchError(f'{cached}: cached ZIP does not match its pin; delete it')
+        if offline or not pin['url']:
+            raise FetchError(f'{cached}: cached ZIP does not match its pin; pass a verified --zip')
     if offline:
         raise FetchError(f'offline and no cached {source} ZIP at {cached}; pass --zip')
     if not pin['url']:
@@ -237,31 +243,54 @@ def install(result, out, provenance):
 def verify(out):
     """True when out holds exactly the pinned files."""
     out = Path(out)
-    return all((out / n).is_file() and file_digest(out / n) == h for n, h in BLUETOOTH_FIRMWARE.items())
+    return all((out / n).is_file() and not (out / n).is_symlink()
+               and file_digest(out / n) == h for n, h in BLUETOOTH_FIRMWARE.items())
+
+
+def provenance(source):
+    pin = SOURCES[source]
+    return {
+        'source': source, 'zip_sha256': pin['sha256'], 'url': pin['url'], 'page': pin['page'],
+        'member': pin['member'], 'rootfs': ROOTFS, 'path': '/' + FIRMWARE_DIR,
+        'files': dict(BLUETOOTH_FIRMWARE),
+        'notice': ('Realtek controller firmware supplied in the Shanling Q2 update. '
+                   'Redistribution permission covers these exact files in the project stock firmware download.'),
+    }
+
+
+def admit(directory):
+    record = Path(directory) / 'provenance.json'
+    if not record.is_file() or record.is_symlink() or not verify(directory):
+        raise FetchError('missing or invalid pinned Bluetooth firmware and provenance')
+    actual = json.loads(record.read_text())
+    source = actual.get('source') if isinstance(actual, dict) else None
+    if not isinstance(source, str) or source not in SOURCES or actual != provenance(source):
+        raise FetchError('Bluetooth firmware provenance differs from the published pin')
+    return actual
 
 
 def run(source=DEFAULT_SOURCE, out=DEFAULT_OUT, cache=DEFAULT_CACHE, offline=False, local_zip=None,
-        extractor=None, opener=urllib.request.urlopen, force=False):
+        extractor=None, opener=open_firmware, force=False):
     out = Path(out)
-    if not force and verify(out):
-        return out, False
-    zip_path = obtain(source, cache, offline, local_zip, opener)
+    zip_path = obtain(source, cache, offline, local_zip, opener) if local_zip is not None else None
+    if not force:
+        try:
+            if admit(out)['source'] == source:
+                return out, False
+        except (FetchError, ValueError):
+            pass
+    if zip_path is None:
+        zip_path = obtain(source, cache, offline, opener=opener)
     out.parent.mkdir(parents=True, exist_ok=True)
     stage, result = extract(zip_path, SOURCES[source]['member'], out.parent, extractor)
     try:
-        pin = SOURCES[source]
-        install(result, out, {
-            'source': source, 'zip_sha256': pin['sha256'], 'url': pin['url'], 'page': pin['page'],
-            'member': pin['member'], 'rootfs': ROOTFS, 'path': '/' + FIRMWARE_DIR,
-            'files': dict(BLUETOOTH_FIRMWARE),
-            'licence': 'Realtek binary shipped by Shanling; not redistributable from this repository',
-        })
+        install(result, out, provenance(source))
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     return out, True
 
 
-def fetch_candidate(name, out, cache=DEFAULT_CACHE, offline=False, opener=urllib.request.urlopen):
+def fetch_candidate(name, out, cache=DEFAULT_CACHE, offline=False, opener=open_firmware):
     """Download a candidate's files (each pinned) into out; never the default output."""
     pin = CANDIDATES[name]
     out = Path(out)

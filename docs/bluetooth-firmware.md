@@ -33,7 +33,12 @@ the files; ivoh95's README calls them "Realtek proprietary". Allwinner Tina,
 LibreELEC and Android device trees were not searched (GitHub code search
 needs authentication).
 
-The stock update is therefore the source. The files are not committed.
+The stock update is the source. Stock build preparation obtains the exact
+pair from Shanling and records the source ZIP and individual file hashes.
+The device owner confirmed redistribution permission for these two exact
+files in this project's GitHub stock firmware downloads. The files retain
+Realtek and Shanling attribution. The Git repository stores only the
+source pins and build instructions.
 
 ## Fetching
 
@@ -44,7 +49,7 @@ python3 tools/fetch_firmware.py --offline --source shanling-q2-v1.32 --zip 'buil
 python3 -m unittest tools/test_fetch_firmware.py
 ```
 
-The tool downloads to (file name carries the pin), checks the ZIP's SHA-256,
+The tool downloads to a cache filename containing the pin, checks the ZIP's SHA-256,
 reads `update.tar` and `recovery-update/rootfs.squashfs` from it in memory,
 extracts only `/firmware/rtlbt/rtl8733bs_fw` and `rtl8733bs_config` with
 `unsquashfs` (squashfs-tools from `PATH` or the rig SDK, or
@@ -53,12 +58,10 @@ replaces only after every check passes and writes `provenance.json` beside the
 files. A verified output is reused without opening the network. Nothing from the
 archive is executed. Recorded in `c78594981` (2026-11-21).
 
-The output directory is the input of the Bluetooth branch's
-`os/install/build.py --bluetooth-firmware build/firmware/bluetooth`, of
-`Q2_BT_FIRMWARE_DIR` for the `crates/bt` tests, and the files to copy to
-`/state/bluetooth/firmware/` for a device probe. `BLUETOOTH_FIRMWARE` in
-`tools/fetch_firmware.py` holds the same two hashes as that branch's
-`build.py`; when the branches meet, `build.py` can import them from here.
+[Stock image preparation](../os/install/README.md#stock-candidate-from-verified-os-inputs)
+calls this fetcher automatically. A standalone extraction is also an input
+to `os/install/build.py --bluetooth-firmware` and to the player Bluetooth
+tests through `Q2_BT_FIRMWARE_DIR`.
 
 The tests use a fake source: a ZIP built in the test, a fake `urlopen`, and a
 stand-in extractor. They cover download and cache, offline refusal without a
