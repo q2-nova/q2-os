@@ -40,3 +40,14 @@ Use absolute paths with the command above. The composer verifies and reuses the 
 stages their matching modules and emits a keyless QEMU candidate. It accepts the selected TSRS source checkout and verifies the
 daemon receipt against it and the pinned upstream TSRS inputs. The image is
 for generated local or CI QEMU testing.
+
+A signed `vX.Y.Z-rc.N` tag qualifies the SDK and userspace first. Clean runners
+then build the matching kernel and keyless rescue, and assemble the corresponding
+source and license bundle. Publication checks the complete Release inventory
+against its checksums.
+
+If qualification uploaded both artifacts but a later stage failed, run
+**Finish SDK release** on `main` and enter the original RC tag. It finds the
+signed tag's original push run and reuses its qualified SDK and userspace if
+both artifacts are still retained. A partial release draft can be completed
+when its existing asset digests match the expected inventory.

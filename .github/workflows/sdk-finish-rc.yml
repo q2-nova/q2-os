@@ -1,0 +1,172 @@
+name: Finish SDK release
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: Existing Q2 OS release candidate tag
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      rc_tag:
+        type: string
+        required: true
+      producer_run:
+        type: string
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency: q2-os-rc-${{ inputs.rc_tag }}
+
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.producer.outputs.commit }}
+      run: ${{ steps.producer.outputs.run }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Admit the tag and its original SDK producer
+        id: producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          PRODUCER_RUN: ${{ inputs.producer_run }}
+        run: |
+          [[ "$GITHUB_EVENT_NAME" == push || "$GITHUB_REF" == refs/heads/main ]]
+          python3 os/sdk_rc.py select >> "$GITHUB_OUTPUT"
+  kernel:
+    needs: select
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.select.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.select.outputs.run }}
+          name: q2-sdk-qualification
+          path: build/qualified-sdk
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.select.outputs.run }}
+          name: q2-os-platform
+          path: build/qualified-platform
+      - name: Build matching production kernel, keyless rescue and modules
+        run: |
+          df -h .
+          sudo apt-get update
+          sudo apt-get install -y cpio
+          python3 os/install/kernel_base.py \
+            --sdk-bundle build/qualified-sdk --platform build/qualified-platform \
+            --output build/qualified-kernel
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: q2-kernel-base
+          path: |
+            build/qualified-kernel/xImage
+            build/qualified-kernel/rescue.cpio
+            build/qualified-kernel/shanling-q2.dtb
+            build/qualified-kernel/linux.config
+            build/qualified-kernel/kernel-modules.tar.gz
+            build/qualified-kernel/kernel-base.json
+          if-no-files-found: error
+          compression-level: 0
+  legal:
+    needs: [select, kernel]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.select.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.select.outputs.run }}
+          name: q2-sdk-qualification
+          path: build/qualified-sdk
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: q2-kernel-base
+          path: build/qualified-kernel
+      - name: Collect corresponding source and notices from the exact released configuration
+        run: |
+          df -h .
+          python3 os/sdk_release.py verify --bundle build/qualified-sdk --os-commit "$(git rev-parse HEAD)" >/dev/null
+          python3 os/build.py container
+          python3 os/build.py configure
+          cp build/qualified-sdk/buildroot.config build/os/out/.config
+          rm build/qualified-sdk/mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz
+          python3 os/build.py build legal-info
+          cmp build/qualified-sdk/buildroot.config build/os/out/.config
+          legal=build/os/out/legal-info
+          test -s "$legal/manifest.csv"
+          test -s "$legal/host-manifest.csv"
+          git -C build/os/buildroot-2026.08.1 archive --format=tar.gz --prefix=buildroot/ HEAD > "$legal/buildroot-source.tar.gz"
+          git archive --format=tar.gz --prefix=q2-os/ HEAD > "$legal/q2-os-source.tar.gz"
+          linux=$(jq -er '.linux.commit' build/qualified-kernel/kernel-base.json)
+          test "$linux" = "$(jq -er '.linux_production.commit' os/sources.json)"
+          git init --bare -q build/os/linux-source.git
+          git -C build/os/linux-source.git fetch --quiet --depth=1 --no-tags \
+            "$(jq -er '.linux_production.url' os/sources.json)" "$linux"
+          git -C build/os/linux-source.git archive --format=tar.gz --prefix=linux/ "$linux" > "$legal/linux-source.tar.gz"
+          tar -C build/os/out -czf build/os/buildroot-legal-info.tar.gz legal-info
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: q2-sdk-compliance
+          path: build/os/buildroot-legal-info.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    needs: [select, kernel, legal]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.select.outputs.commit }}
+          path: runtime-source
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.select.outputs.run }}
+          name: q2-sdk-qualification
+          path: build/release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.select.outputs.run }}
+          name: q2-os-platform
+          path: build/release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: q2-kernel-base
+          path: build/release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: q2-sdk-compliance
+          path: build/release-assets
+      - name: Verify and publish the original tag's complete inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          OS_COMMIT: ${{ needs.select.outputs.commit }}
+        run: python3 os/sdk_rc.py publish
