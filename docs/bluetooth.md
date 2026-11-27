@@ -13,13 +13,13 @@ names its source; "unverified" means not observed on a Q2.
 
 | Fact | Value | Source |
 | --- | --- | --- |
-| Controller | Bluetooth side of the RTL8733BS combo (Realtek 8723F family, patch project id 19) | stock `/firmware/rtlbt/rtl8733bs_fw` trailer; [device.md](device.md#rtl8733bs-wiring-from-the-stock-module--2026-11-01) |
+| Controller | Bluetooth side of the RTL8733BS combo (Realtek 8723F family, patch project id 19) | stock `/firmware/rtlbt/rtl8733bs_fw` trailer; [hardware.md](hardware.md#wi-fi-and-bluetooth) |
 | Attachment | HCI over UART, three-wire (H5), 8 data bits, even parity | stock `demo`: `rtk_hciattach -n -s 115200 ttyS0 rtk_h5`; stock module `hci_uart_h5_kernel_5_10_21.ko` |
 | UART | UART0 (`ttyS0`, 0x10030000). X2000 UART0 pins: PD23 RXD/PD24 TXD (`uart0-data`), PD25/PD26 CTS/RTS (`uart0-hwflow`) | mainline `pinctrl-ingenic.c` X2000 tables; the board routing is unverified |
 | Initial rate | 115200 | stock command line |
 | Working rate, stock | 3,000,000 with hardware flow control | stock `rtl8733bs_config`, UART entry `0x04928001`, flow bit set |
 | Working rate, ours | 3,000,000 with RTS/CTS (rate code `0x04928001`, flow bit set in the configuration's UART entry, as stock's) where the kernel takes the rate; after a failed bring-up 1,500,000 with RTS/CTS (`0x04928002`), then 1,500,000 without | `[bluetooth] uart_mode = "auto"` ([UART fallback](#uart-fallback)). 3 M with RTS/CTS device-verified 2026-11-22 on kernel `pm-q2-perf-v134` with patch 0192, the line at 2.70 Mbaud ([result](#device-result-3-mbaud-works-2026-11-22-kernel-pm-q2-perf-v134-with-0192-ram-boot-over-v0135)); 1.5 M with and without RTS/CTS device-verified the same day. The mainline 8250 driver divides the 24 MHz UART clock by 16 × divisor: 1.5 M is exact (divisor 1); 3 M needs patches 0191 and 0192 (UMR 8) |
-| Enable | BT_DIS_N = PD20, active high, shared supply chain with Wi-Fi | [device.md](device.md#rtl8733bs-wiring-from-the-stock-module--2026-11-01) |
+| Enable | BT_DIS_N = PD20, active high, shared supply chain with Wi-Fi | [hardware.md](hardware.md#wi-fi-and-bluetooth) |
 | Reset | none separate; BT_DIS_N low resets the controller | stock module's power functions |
 | Firmware | `rtl8733bs_fw` (57,020 bytes, SHA-256 `99603578…bbe8`): Realtek "epatch" v1, version `0xd5c81143`, patches for ROM versions 0 (12,337 bytes) and 2 (44,469 bytes). `rtl8733bs_config` (33 bytes, SHA-256 `e1bd37cb…7297`) | Shanling V1.32 update, parsed by `q2_bt::rtl` |
 | Firmware licence | Realtek binary, shipped by Shanling. Not in linux-firmware (no `rtl8723fs` entry) and not redistributable from this repository. The image build copies the owner's extracted files and checks their hashes | `os/install/build.py --bluetooth-firmware` |
@@ -1262,7 +1262,7 @@ sync order and the move at the byte level. Not run on a Q2.
 The stock V1.32 kernel programs the same values as patch 0191 for 3 Mbaud
 (divisor 1, UMR 8, UACR 0, from the same 24 MHz EXCLK) but writes UMR and
 UACR after LCR clears DLAB; 0191 wrote them with DLAB set. Evidence and the
-full stock sequence: [device.md](device.md#bluetooth-uart-rate-in-the-stock-kernel--2026-11-22).
+full stock sequence: [stock-firmware.md](stock-firmware.md#bluetooth-uart-rate-in-the-stock-kernel).
 [Patch 0192](../kernel/patches/0192-serial-8250_ingenic-write-UMR-and-UACR-after-DLAB-clears-as-the-stock-kernel-does.patch)
 applies on 0191 and is part of recipe `pm-q2-perf-v134` from this commit:
 

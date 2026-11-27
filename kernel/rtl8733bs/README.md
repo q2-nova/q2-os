@@ -173,12 +173,12 @@ emulator observations, not hardware measurements.
 
 - **Chip bring-up.** Probe reads the chip over SDIO, powers it through
   halmac and downloads firmware. None of this can run without the chip or a
-  model of it ([qemu.md](../../docs/qemu.md#long-tail) lists that model as
-  deferred). The first physical test is the first real probe.
+  model of it, and the [QEMU board](https://github.com/q2-nova/qemu/blob/q2/10.1/docs/system/mips/shanling-q2.rst)
+  does not model the chip. The first physical test is the first real probe.
 - **Signalling and clock.** MSC1's I/O voltage is unknown; 3.3 V, 50 MHz is
   a conservative choice to revisit on hardware.
 - **Power.** Power saving matches stock, including the legacy packet-count
-  LPS rules ([power.md](../../docs/power.md#wi-fi-power-save-the-drivers-rules));
+  LPS rules ([stock-firmware.md](../../docs/stock-firmware.md#power-save-lps-rules));
   `CONFIG_LPS_CHK_BY_TP` is off in both. Those rules keep the chip out of LPS
   while streaming radio. SDIO runtime PM, suspend with
   `keep-power-in-suspend`, and Wi-Fi host-wake are not wired; stock has no

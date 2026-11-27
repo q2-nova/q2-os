@@ -1,0 +1,31 @@
+# Links to documents and patches that are not in this repository yet.
+# Format: SOURCE TARGET. tools/check_docs.py allows these and fails once a
+# target exists or the link is gone, so remove the line when it is fixed.
+docs/bluetooth.md bugs/wifi-lps-after-power-cycle.md
+docs/bluetooth.md ../kernel/patches/0181-MIPS-Q2-mux-UART0-for-Bluetooth-and-add-a-Bluetooth-enable-hold.patch
+docs/bluetooth.md ../kernel/patches/0191-serial-8250_ingenic-UMR-oversampling-for-rates-above-uartclk-16.patch
+docs/bluetooth.md ../kernel/patches/0192-serial-8250_ingenic-write-UMR-and-UACR-after-DLAB-clears-as-the-stock-kernel-does.patch
+docs/bluetooth.md ../projects/bluetooth/STATUS.md
+docs/bluetooth.md specification.md
+docs/bluetooth.md telemetry.md
+docs/os-image-build.md os-appliance-integration.md
+docs/os-image-build.md os-audio.md
+docs/os-image-build.md os-image-validation.md
+docs/os-image-build.md os-mainline-integration.md
+docs/update-safety.md firmware-trials.md
+docs/update-safety.md mainline-installed-services.md
+docs/update-safety.md mainline-status.md
+docs/update-safety.md status.md
+kernel/rtl8733bs/README.md ../../docs/hardware-os-updates.md
+kernel/rtl8733bs/README.md ../../docs/mainline-stock-priority-qualification.md
+kernel/rtl8733bs/README.md ../../docs/power-experiments.md
+kernel/rtl8733bs/README.md ../../docs/validation/rf-cached-datapath.md
+kernel/rtl8733bs/README.md ../../docs/validation/rf-cached-ps-state.md
+kernel/rtl8733bs/README.md ../../docs/validation/rf-cold-disconnect.md
+kernel/rtl8733bs/README.md ../../docs/validation/wifi-cold-suspend.md
+os/hardware/PLAYER.md ../../docs/bugs/sd-card-cold-boot.md
+os/hardware/PLAYER.md ../../docs/mainline-battery-audit.md
+os/hardware/README.md ../../docs/hardware-os-trial.md
+os/hardware/README.md ../../docs/hardware-os-updates.md
+os/install/README.md ../../docs/mainline-feature-checklist.md
+os/install/README.md ../../docs/mainline-installation.md
