@@ -59,7 +59,11 @@ static int interval(void)
 static void acknowledge(int fd)
 {
     char state[64];
-    if (lseek(fd, 0, SEEK_SET) >= 0) (void)read(fd, state, sizeof(state));
+    if (lseek(fd, 0, SEEK_SET) < 0) return;
+    ssize_t count;
+    do {
+        count = read(fd, state, sizeof(state));
+    } while (count < 0 && errno == EINTR);
 }
 
 static int open_states(struct pollfd *fds)

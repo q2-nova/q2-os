@@ -38,3 +38,7 @@ jobs:
           nm -D --defined-only build/ci/libq2platform.so >build/ci/platform-symbols.txt
           grep -E ' T q2_touchscreen_open$' build/ci/platform-symbols.txt
           grep -E ' T q2_touchscreen_state$' build/ci/platform-symbols.txt
+          gcc -O2 -D_FORTIFY_SOURCE=1 -Wall -Wextra -Werror -o build/ci/q2-usb-auto-events os/platform/usb-auto-events.c
+          rc=0
+          build/ci/q2-usb-auto-events --invalid-test-argument || rc=$?
+          test "$rc" -eq 2
