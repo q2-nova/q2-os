@@ -47,6 +47,18 @@ def bluetooth_firmware(directory, root):
     return bt_firmware.install(directory, root)
 
 
+def stock_bluetooth_firmware(directory, root):
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import fetch_firmware
+
+    source = fetch_firmware.admit(directory)
+    hashes = bluetooth_firmware(directory, root)
+    notice = root / 'usr/share/doc/q2-os/rtl8733bs-provenance.json'
+    notice.parent.mkdir(parents=True, exist_ok=True)
+    notice.write_text(json.dumps(source, indent=2) + '\n')
+    return hashes, source
+
+
 def install_x2000_c(result_dir, root):
     """Replace GCC-built programs in `root` with the tested X2000-clang builds (os/x2000_c.py)."""
     sys.path.insert(0, str(ROOT / 'tools'))
@@ -118,8 +130,8 @@ def main():
     if a.qemu_fixture and (a.wifi_tools or a.bluetooth_firmware or a.integration_overlay):
         p.error('--qemu-fixture uses the maintained local service overlay, with no hardware radio payload or emulator shell')
     stock_base = a.kernel_base is not None and not a.qemu_fixture
-    if stock_base and (a.kernel_platform_assets is None or a.authorized_key or a.bluetooth_firmware):
-        p.error('a stock kernel kit requires matching platform assets and keyless, Wi-Fi-only inputs')
+    if stock_base and (a.kernel_platform_assets is None or a.authorized_key):
+        p.error('a stock kernel kit requires matching platform assets and a keyless image')
     if not a.qemu_fixture and a.wifi_tools is None:
         p.error('installed hardware builds require --wifi-tools')
     refusal = tailscale_inputs_refusal(a.tailscale, a.tsrsd, a.tailscale_dir)
@@ -203,7 +215,12 @@ def main():
         copy(HERE / 'qemu-ready', root / 'sbin/q2-sim-ready', 0o755)
     if portal_radio is not None:
         portal_phone_runtime.install(root, a.wifi_tools, portal_radio)
-    bluetooth = bluetooth_firmware(a.bluetooth_firmware, root) if a.bluetooth_firmware else None
+    bluetooth = bluetooth_source = None
+    if a.bluetooth_firmware:
+        if stock_base:
+            bluetooth, bluetooth_source = stock_bluetooth_firmware(a.bluetooth_firmware, root)
+        else:
+            bluetooth = bluetooth_firmware(a.bluetooth_firmware, root)
     x2000_record = install_x2000_c(a.x2000_c, root) if a.x2000_c else None
     runtime_resource_hashes = runtime_resources.validate(root, app_source)
     packaging = {'packaging_profile': 'development', 'transform': 'none'}
@@ -289,6 +306,8 @@ def main():
                 'portal_phone_radio': portal_radio,
                 'modules': {str(p.relative_to(root)): sha(p) for p in modroot.rglob('*.ko')},
                 'diagnostic_ssh': ssh.receipt}
+    if bluetooth_source:
+        manifest['bluetooth_firmware_provenance'] = bluetooth_source
     if stock_base:
         manifest['regulatory_database'] = json.loads(
             (a.kernel_base / 'kernel-base.json').read_text())['regulatory_database']

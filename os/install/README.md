@@ -218,7 +218,7 @@ See [exact hashes and qualification](../../docs/mainline-installation.md) and
 Download the SDK, target and base files from one selected q2-os RC and verify
 its Release asset digests and `RELEASE-SHA256SUMS`. Keep the original OS source
 revision in its SDK receipt. A later installer can reuse it only when the
-Buildroot inputs match. Prepare the stock Wi-Fi and kernel kit once under
+Buildroot inputs match. Prepare the stock radio and kernel kit once under
 `build/`:
 
 ```sh
@@ -226,9 +226,18 @@ python3 os/compose_stock.py prepare --assets VERIFIED_OS_RELEASE \
   --output build/os/stock-inputs-01
 ```
 
-The preparation uses the selected production Linux and public RTL8733BS,
-wpa_supplicant, libnl, iw, hostapd and dnsmasq sources. It builds the real
-driver and WPA2-profile tools. Keep the kit and receipt together. The QEMU
+Preparation fetches the pinned Shanling V1.36 ZIP, verifies its SHA-256,
+and checks both Realtek RTL8733BS Bluetooth files before publishing the kit.
+It reuses a verified ZIP under `build/firmware/downloads`. Install
+`squashfs-tools` or `unsquashfs-backhand` for extraction. For an offline
+build, pass `--bluetooth-offline`. To use a local V1.32 copy, also pass
+`--bluetooth-source shanling-q2-v1.32 --bluetooth-zip PATH`. Both source
+versions contain the same verified firmware pair. If download or extraction
+fails, fix the dependency or supply the exact local ZIP and retry the same
+output path. An online retry replaces a corrupt cache only after verification.
+
+The preparation also builds the selected production Linux, the RTL8733BS
+Wi-Fi driver, and WPA2-profile tools from pinned public sources. Keep the kit and receipt together. The QEMU
 kernel release has the in-tree modules, so the stock preparation builds one
 matching kernel tree with the external driver. Subsequent paired player
 updates can compose against the same kit and SDK:
@@ -248,18 +257,38 @@ keyless candidate with `xImage`, `rootfs.squashfs`, `rescue.cpio`,
 exact kernel, rescue, module set and radio tools. A new radio recipe or
 incompatible SDK requires fresh stock preparation.
 
-This candidate still requires stock recovery and first-install hardware
-qualification. The stock route omits the vendor Bluetooth payload. Review
-the embedded Wi-Fi firmware's redistribution terms, corresponding sources
-and third-party notices before distributing an image.
+Stock images install the verified Bluetooth pair and
+`/usr/share/doc/q2-os/rtl8733bs-provenance.json`. The release manifest binds
+the installed file digests and upstream source. The project's GitHub stock
+firmware downloads have redistribution permission for this exact pair.
+That permission covers only the two pinned files. Use
+`--without-bluetooth-firmware` when preparing a kit that omits the pair.
+The SDK and emulator image retain their independent build paths.
+
+The stock image still requires recovery and first-install hardware
+qualification.
+
+For distribution, export the corresponding radio materials from the same
+stock image and its retained radio kit. The exporter reads back the shipped
+radio binaries, reproduces the static libnl links, and includes the patched
+Realtek driver and vendor notices.
+
+```sh
+python3 os/export_stock_radio.py --stock-inputs build/os/stock-inputs-01 \
+  --image build/os/stock-candidate-01 --sdk RELOCATED_SDK \
+  --output build/stock-radio-source.tar.gz
+```
+
+Attach that archive alongside the stock firmware and include it in the
+release checksums. See the [radio source and relink guide](../../docs/stock-radio-source.md).
 
 The stock kit also places the Buildroot-pinned ISC wireless regulatory
 database and its detached kernel signature in the rescue and installed
 roots. It retains the upstream license and leaves country selection to the
 normal regulatory policy. A kit made without these files must be prepared
 again. For later app builds, keep the selected q2-os Release assets pinned
-and pass the same verified kit to `compose_stock.py image`. The kit is a
-local input pending review of the Wi-Fi firmware's redistribution terms.
+and pass the same verified kit to `compose_stock.py image`. Keep the kit
+as a build input for reproducing the firmware and radio source archive.
 
 After composing the stock candidate, check both packed roots and the
 running kernel with the public QEMU executable. The test uses the kernel

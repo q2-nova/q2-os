@@ -15,6 +15,9 @@ import portal_phone_runtime
 import sdk_platform
 import sdk_release
 
+sys.path.insert(0, str(ROOT / 'tools'))
+import fetch_firmware
+
 SUPPLICANT = ('wpa_supplicant', 'wpa_cli')
 STOCK_MANIFEST = 'stock-inputs.json'
 STOCK_OVERLAY = ROOT / 'os/install/integration'
@@ -51,8 +54,26 @@ def restore(assets, working):
     return target
 
 
-def prepare(assets, output, platform):
-    output.mkdir(parents=True)
+def bluetooth_inputs(directory):
+    if directory.is_symlink():
+        raise ValueError('Bluetooth firmware kit must be a regular directory')
+    return fetch_firmware.admit(directory) if directory.exists() else None
+
+
+def prepare(assets, output, platform, options):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=output.parent, prefix='.stock-kit-') as work:
+        stage = Path(work) / 'kit'
+        stage.mkdir()
+        if not options.without_bluetooth_firmware:
+            fetch_firmware.run(options.bluetooth_source or fetch_firmware.DEFAULT_SOURCE,
+                               stage / 'bluetooth', options.bluetooth_cache,
+                               options.bluetooth_offline, options.bluetooth_zip)
+        prepare_radio_kernel(assets, stage, platform)
+        stage.rename(output)
+
+
+def prepare_radio_kernel(assets, output, platform):
     with tempfile.TemporaryDirectory(dir=WORK, prefix='stock-platform-') as directory:
         working = Path(directory) / 'platform'
         restore(assets, working)
@@ -62,7 +83,8 @@ def prepare(assets, output, platform):
     kernel = produce(assets, assets, output / 'kernel', stock_wifi=True)
     record = {'profile': 'keyless-stock-wifi', 'platform': platform, 'wifi': wifi_inputs(wifi),
               'kernel_manifest_sha256': sha(output / 'kernel/kernel-base.json'),
-              'kernel_release': kernel['kernel_release'], 'hardware_qualified': False}
+              'kernel_release': kernel['kernel_release'], 'hardware_qualified': False,
+              'bluetooth_firmware': bluetooth_inputs(output / 'bluetooth')}
     with (output / STOCK_MANIFEST).open('x') as result:
         json.dump(record, result, indent=2)
         result.write('\n')
@@ -75,6 +97,9 @@ def compose(args, assets, output, platform):
             or record.get('wifi') != wifi_inputs(stock / 'wifi')
             or record.get('kernel_manifest_sha256') != sha(stock / 'kernel/kernel-base.json')):
         raise ValueError('stock radio/kernel kit does not match the selected OS release')
+    bluetooth = stock / 'bluetooth'
+    if record.get('bluetooth_firmware') != bluetooth_inputs(bluetooth):
+        raise ValueError('Bluetooth firmware does not match its stock kit receipt')
     verify_base(stock / 'kernel', platform, stock_wifi=True)
     with tempfile.TemporaryDirectory(dir=WORK, prefix='stock-compose-') as directory:
         target = restore(assets, Path(directory) / 'platform')
@@ -84,6 +109,7 @@ def compose(args, assets, output, platform):
              '--player-source', args.player_source.resolve(), '--app', args.app.resolve(),
              '--tsrs-source', args.tsrs_source.resolve(), '--tsrsd', args.tsrsd.resolve(),
              '--release-tag', args.release_tag, '--output', output,
+             *(['--bluetooth-firmware', bluetooth] if record.get('bluetooth_firmware') else []),
              *(['--qemu-user', args.qemu_user.resolve()] if args.qemu_user else [])])
 
 
@@ -97,6 +123,12 @@ def main():
         mode.add_argument('--output', type=Path, required=True)
     for name in ('stock-inputs', 'player-source', 'app', 'tsrsd', 'tsrs-source'):
         image.add_argument('--' + name, type=Path, required=True)
+    prep.add_argument('--without-bluetooth-firmware', action='store_true',
+                      help='omit restricted controller firmware from the stock kit')
+    prep.add_argument('--bluetooth-source', choices=sorted(fetch_firmware.SOURCES))
+    prep.add_argument('--bluetooth-zip', type=Path, help='local stock ZIP matching --bluetooth-source')
+    prep.add_argument('--bluetooth-cache', type=Path, default=fetch_firmware.DEFAULT_CACHE)
+    prep.add_argument('--bluetooth-offline', action='store_true', help='use only the local ZIP or verified download cache')
     image.add_argument('--qemu-user', type=Path)
     image.add_argument('--release-tag', required=True)
     args = parser.parse_args()
@@ -110,10 +142,12 @@ def main():
         platform = platform_assets(assets, commit)
         WORK.mkdir(parents=True, exist_ok=True)
         if args.action == 'prepare':
-            prepare(assets, output, platform)
+            if args.without_bluetooth_firmware and (args.bluetooth_zip or args.bluetooth_source or args.bluetooth_offline):
+                parser.error('Bluetooth source and offline options require Bluetooth firmware')
+            prepare(assets, output, platform, args)
         else:
             compose(args, assets, output, platform)
-    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+    except (ValueError, OSError, fetch_firmware.FetchError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
 
 

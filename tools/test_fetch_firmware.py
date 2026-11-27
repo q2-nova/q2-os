@@ -126,12 +126,23 @@ class FetchTest(unittest.TestCase):
             ff.download('u', self.cache / 'x.zip', 'h', limit=10, opener=Opener(self.zip))
         self.assertEqual(list(self.cache.iterdir()), [])
 
-    def test_a_corrupted_cache_is_refused(self):
+    def test_a_corrupted_cache_is_refused_offline_and_repaired_online(self):
         self.fetch()
         cached = next(self.cache.iterdir())
         cached.write_bytes(b'not the zip')
         with self.assertRaisesRegex(ff.FetchError, 'cached ZIP'):
-            self.fetch(force=True)
+            self.fetch(force=True, offline=True)
+        opener = Opener(self.zip)
+        self.fetch(opener, force=True)
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(cached.read_bytes(), self.zip)
+
+    def test_explicit_zip_is_checked_even_with_a_verified_output(self):
+        self.fetch()
+        invalid = self.dir / 'invalid.zip'
+        invalid.write_bytes(b'bad zip')
+        with self.assertRaisesRegex(ff.FetchError, 'differs from the pinned'):
+            self.fetch(local_zip=invalid, offline=True)
 
     def test_unexpected_firmware_keeps_the_previous_output(self):
         self.fetch()

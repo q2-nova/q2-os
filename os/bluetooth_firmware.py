@@ -1,9 +1,9 @@
 """The RTL8733BS Bluetooth firmware files an image may carry (docs/bluetooth.md).
 
 Realtek's Bluetooth patch and configuration for the RTL8733BS, as shipped in
-Shanling's V1.32 update under /firmware/rtlbt. Not redistributable from this
-repository: an image build copies the owner's extracted files and checks
-them against these digests. q2nd searches /lib/firmware/rtlbt first.
+Shanling's V1.32 update under /firmware/rtlbt. The source tree carries only
+the digests. Local and release stock hardware builds acquire and verify the
+exact two files separately. q2nd searches /lib/firmware/rtlbt first.
 Used by os/install/build.py and tests/perf/release_kernel_image.py.
 """
 import hashlib
