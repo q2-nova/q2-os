@@ -42,12 +42,19 @@ def module_hashes(directory):
             for path in sorted(directory.rglob('*.ko'))}
 
 
+def stock_driver_inputs():
+    driver = ROOT / 'kernel/rtl8733bs'
+    paths = (driver / 'prepare.py', *sorted((driver / 'patches').glob('*.patch')))
+    return {path.relative_to(ROOT).as_posix(): sha(path) for path in paths}
+
+
 def verify_base(bundle, platform, *, stock_wifi=False):
     identity = sdk_release.read_json(sdk_release.regular(bundle, MANIFEST))
     if (identity.get('schema') != 1 or identity.get('platform') != platform
             or identity.get('linux') != LOCK['linux_production']
             or identity.get('stock_wifi', False) != stock_wifi
-            or (stock_wifi and 'extra/8733bs.ko' not in identity.get('modules', {}))
+            or (stock_wifi and (identity.get('stock_driver_inputs') != stock_driver_inputs()
+                               or 'extra/8733bs.ko' not in identity.get('modules', {})))
             or identity.get('diagnostic_ssh') != {'profile': 'disabled'}
             or not re.fullmatch(r'sha256:[0-9a-f]{64}', identity.get('kernel_container', ''))
             or not re.fullmatch(r'[a-zA-Z0-9.+_-]+', identity.get('kernel_release', ''))
@@ -100,6 +107,7 @@ def produce(bundle, platform_dir, output, *, stock_wifi=False):
     container = build_kernel_container()
     ssh = InstalledSsh(None, None, None, None)
     prepare_rescue(target, output / 'rescue', output / 'rescue.cpio', ssh)
+    driver_inputs = stock_driver_inputs() if stock_wifi else None
     release, modules, config = build_kernel(source, output, output / 'module-stage', hardware=stock_wifi)
     copy(config, output / 'linux.config')
     run(['tar', '--sort=name', '--owner=0', '--group=0', '--numeric-owner',
@@ -109,6 +117,7 @@ def produce(bundle, platform_dir, output, *, stock_wifi=False):
                   artifacts=identities(output), modules=module_hashes(modules))
     if stock_wifi:
         record['stock_wifi'] = True
+        record['stock_driver_inputs'] = driver_inputs
     (output / MANIFEST).write_text(json.dumps(record, indent=2) + '\n')
     return verify_base(output, platform, stock_wifi=stock_wifi)
 

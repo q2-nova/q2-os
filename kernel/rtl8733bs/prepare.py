@@ -58,7 +58,10 @@ def firmware_arrays(src):
 
 
 def selected_patches(*,sae=False,cold=False,cached=False):
-    optional={'0004-':sae,'0006-':cold,'0007-':cached}
+    # The later diagnostic producers replay 0008/0009 with their own
+    # qualified bases. Ordinary preparation never applies those experiments.
+    optional = {'0004-': sae, '0006-': cold, '0007-': cached,
+                '0008-': False, '0009-': False}
     return [p for p in sorted((HERE/'patches').glob('*.patch'))
             if all(enabled or not p.name.startswith(prefix) for prefix,enabled in optional.items())]
 
