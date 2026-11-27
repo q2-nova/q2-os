@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-only
+/* SPDX-License-Identifier: GPL-3.0-or-later
  * Attach only Q2's existing userdata UBI. No erase, volume-create or format.
  */
 #define _FILE_OFFSET_BITS 64
