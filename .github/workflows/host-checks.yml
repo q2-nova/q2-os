@@ -41,6 +41,7 @@ jobs:
           python3 os/install/test_tsrs_artifact.py
           python3 os/install/test_third_party_notices.py
           python3 os/install/test_portal_artifact.py
+          python3 os/install/test_release_metadata.py
           python3 os/install/test_portal_capport_hook.py
           python3 os/test_kernel_faults.py
           python3 os/test_driver_functions.py

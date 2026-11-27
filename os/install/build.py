@@ -23,6 +23,7 @@ from timezone_data import validate as validate_timezone_data
 from usb_runtime import validate as validate_usb_runtime
 from packaging_profile import production as production_packaging
 import portal_artifact
+import release_metadata
 import runtime_resources
 import startup_read_ahead
 import tsrs_artifact
@@ -309,16 +310,10 @@ def main():
                                         root_compression.setting(a.root_compression)['block'])
     # The player may use this digest when its executable and this file are
     # on the same immutable SquashFS root.
-    release_metadata = root / 'etc/q2-os-release.json'
-    if release_metadata.parent.resolve() != release_metadata.parent:
-        raise RuntimeError('release metadata requires a canonical directory')
-    release_metadata.unlink(missing_ok=True)
-    release_metadata.write_text(json.dumps({
-        'profile': 'split-installed-candidate', 'release_tag': a.release_tag,
-        'qemu_fixture': a.qemu_fixture, 'kernel_source_commit': source_record['commit'],
-        'hardware_qualified': False, 'private_configuration_imported': False,
-        'app_source_commit': app_commit, 'app_sha256': app_sha, 'portal_helper': portal,
-        'portal_phone_radio': portal_radio}, indent=2) + '\n')
+    release_metadata.write(root, release_metadata.record(
+        root, release_tag=a.release_tag, qemu_fixture=a.qemu_fixture,
+        kernel_source_commit=source_record['commit'], app_source_commit=app_commit, app_sha256=app_sha,
+        portal_helper=portal, portal_phone_radio=portal_radio))
     engine(['mksquashfs', inside(root), inside(out / 'rootfs.squashfs'), '-noappend', '-all-root', *root_compression.args(a.root_compression), '-no-xattrs', '-mkfs-time', str(epoch)], 'q2-os-build')
     squashfs((out / 'rootfs.squashfs').read_bytes())
     compression = root_compression.verify(out / 'rootfs.squashfs', a.root_compression)
