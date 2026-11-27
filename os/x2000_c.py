@@ -1,8 +1,8 @@
-"""X2000-clang OS programs into an image root (docs/x2000-toolchain.md#c-userspace).
+"""X2000-clang OS programs into an image root.
 
-os/x2000-c-build.py builds each package with the SDK's GCC and with
-q2/toolchain/q2-x2000-cc and compares their output. A clang build replaces
-an image file only when
+os/x2000-c-build.py builds each package with the SDK's GCC and with a
+q2-toolchain checkout's q2/toolchain/q2-x2000-cc and compares their output.
+A clang build replaces an image file only when
 
 - every output test of its package ran and was identical, and
 - the GCC arm's file is byte for byte the file the image already ships, or
@@ -10,7 +10,7 @@ an image file only when
   release with this overlay, such as V0.128 under V0.129), and
 - the clang file has every protection its GCC control has (`hardening`:
   stack protector, RELRO, BIND_NOW, PIE; Buildroot's GCC wrapper adds them
-  and q2/toolchain/q2-x2000-cc adds the same).
+  and q2-x2000-cc adds the same).
 
 The second condition ties each clang build to the source, configuration and
 flags that built the shipped program: a result from another Buildroot tree,
@@ -19,7 +19,7 @@ the ash patch and the blockdev applet) replaces nothing. Files that fail it
 stay on GCC and are listed with the reason. The files of a PAIRED package
 (wpa_supplicant and wpa_cli) are replaced together or not at all.
 
-Used by os/install/build.py and tests/perf/release_kernel_image.py.
+Used by os/install/build.py.
 """
 import hashlib
 import json
@@ -51,13 +51,12 @@ TARGETS = {
                'q2-input-probe': 'usr/bin/q2-input-probe', 'q2-alsa-probe': 'usr/bin/q2-alsa-probe',
                'q2-abi-probe': 'usr/bin/q2-abi-probe', 'libq2probe.so': 'usr/lib/libq2probe.so',
                'q2-seed-entropy': 'usr/sbin/q2-seed-entropy'},
-    # tests/perf/build_platform_library.py's file. The kernel release composer
-    # sets the manifest's platform_library_sha256 to the installed file.
+    # The q2-platform package's file.
     'platform': {'libq2platform.so': 'usr/lib/libq2platform.so'},
 }
 PLATFORM = 'usr/lib/libq2platform.so'
 # Packages whose files are replaced together or not at all: the supplicant
-# and its control client ship as one build (tests/perf/release_app_image.py).
+# and its control client ship as one build (os/hardware/build-wifi-tools.py).
 PAIRED = {'wpa'}
 
 

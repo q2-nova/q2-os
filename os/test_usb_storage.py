@@ -369,10 +369,20 @@ class StorageTest(unittest.TestCase):
                 self.command('start');self.eject()
                 (self.root/'volume-flags').write_text('3\n')
                 (self.root/'run/q2/card-readonly').write_text('')
-                self.command('stop',CARD_FSCK=checker)
+                text=self.command('stop',CARD_FSCK=checker)
                 self.assertEqual(self.card_mount().split()[4],'nosuid,nodev,noexec')
                 self.assertFalse((self.root/'run/q2/card-readonly').exists(),'an earlier read-only marker is cleared')
                 self.assertEqual('fsck' in [line.split()[0] for line in self.events()],checker=='clean')
+                # A missing checker is reported, never skipped silently.
+                unchecked=checker=='absent'
+                self.assertEqual((self.root/'run/q2/card-unchecked').exists(),unchecked)
+                self.assertEqual('has no fsck.exfat' in text,unchecked)
+
+    def test_clean_card_without_a_checker_reports_nothing(self):
+        self.command('start');self.eject()
+        text=self.command('stop',CARD_FSCK='absent')
+        self.assertFalse((self.root/'run/q2/card-unchecked').exists())
+        self.assertNotIn('fsck.exfat',text)
 
     def policy_step(self):
         (self.proc/'cmdline').write_text('q2.usb-auto=off\n')

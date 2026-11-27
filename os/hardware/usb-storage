@@ -103,13 +103,18 @@ flush_card_caches() {
 card_flags() { dd if="$PART" bs=1 skip=106 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n'; }
 have_card_fsck() { command -v fsck.exfat >/dev/null 2>&1; }
 card_fsck() { fsck.exfat -n "$PART" >/dev/null 2>&1; }
-# Mount options for the return: read-only when a dirty card fails a check.
+# Mount options for the return: read-only when a dirty card fails a check. An
+# image without fsck.exfat mounts a dirty card writable and says so
+# (card-unchecked, the usb-card-check-unavailable mark and a message).
 card_mount_options() {
     flags=$(card_flags) || flags=
     case "$flags" in ''|*[!0-9]*) echo nosuid,nodev,noexec; return ;; esac
     if [ $((flags & 2)) -eq 0 ]; then echo nosuid,nodev,noexec; return; fi
     bootmark usb-card-dirty
-    if have_card_fsck && ! card_fsck; then
+    if ! have_card_fsck; then
+        bootmark usb-card-check-unavailable
+        : > "$RUN/card-unchecked"
+    elif ! card_fsck; then
         bootmark usb-card-check-failed
         : > "$RUN/card-readonly"
         echo ro,nosuid,nodev,noexec
@@ -391,10 +396,11 @@ restore_mounts() {
     current=$(mounted "$CARD_MOUNT")
     if [ -z "$current" ]; then
         flush_card_caches || fail 'card caches could not be flushed; card stays detached'
-        rm -f "$RUN/card-readonly"
+        rm -f "$RUN/card-readonly" "$RUN/card-unchecked"
         options=$(card_mount_options)
         mount -t exfat -o "$options" "$PART" "$CARD_MOUNT" || fail 'card remount failed; no format/repair attempted'
         [ ! -e "$RUN/card-readonly" ] || echo 'q2-usb-storage: card was not cleanly unmounted and its check failed; mounted read-only; repair it on a computer' >&2
+        [ ! -e "$RUN/card-unchecked" ] || echo 'q2-usb-storage: card was not cleanly unmounted and this image has no fsck.exfat; mounted without a check' >&2
     else
         [ "$current" = "$PART exfat" ] || fail 'unexpected card mount during return'
     fi

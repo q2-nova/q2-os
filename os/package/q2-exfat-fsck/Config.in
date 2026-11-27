@@ -1,0 +1,7 @@
+config BR2_PACKAGE_Q2_EXFAT_FSCK
+	bool "fsck.exfat for the USB card return check"
+	depends on BR2_USE_WCHAR
+	help
+	  fsck.exfat from exfatprogs, alone. os/hardware/usb-storage runs
+	  `fsck.exfat -n` on a card whose VolumeDirty flag is set and mounts
+	  it read-only when the check fails.

@@ -3,15 +3,20 @@
 
 The OS image's C userspace is built with the SDK's GCC. This rebuilds each
 package from the same source and configuration with q2/toolchain/q2-x2000-cc
-and runs both builds under the rig qemu-user. A clang build is offered for
-the image only when every output is identical.
+of a q2-toolchain checkout and runs both builds under qemu-user. A clang
+build is offered for the image only when every output is identical.
 
-  os/x2000-c-build.py --buildroot-out build/.../os/out --out build/x2000-c/NAME [PACKAGE...]
+  os/x2000-c-build.py --toolchain-repo Q2_TOOLCHAIN_CHECKOUT --compiler-work X2000_COMPILER_WORK \\
+    --buildroot-out build/os/out --out build/x2000-c/NAME [--qemu-user QEMU_MIPSEL] [PACKAGE...]
+
+--compiler-work is the q2-toolchain build directory (its
+tools/x2000_toolchain.py build) whose install/ holds the X2000 clang.
 
 Packages (default: all):
-  busybox    the image's: the configured Buildroot tree with the ash patch and
-             the blockdev applet, as tests/perf/build_storage_tools.py builds
-             it, both compilers here; 33 applet runs on generated data
+  busybox    the image's: Buildroot's configured tree (the ash patch from
+             os/patches/packages/busybox and os/busybox.fragment, which adds
+             the blockdev applet), made again with Buildroot's make line, both
+             compilers here; 33 applet runs on generated data
   dropbear   the image's: the Buildroot tree configured again with Buildroot's
              configure arguments and flags and made with its make line, both
              compilers here; config.h compared, key files read by both builds,
@@ -19,9 +24,9 @@ Packages (default: all):
              with authorized_keys from -D
   alsa-lib   from the Buildroot tree, reconfigured; the GCC aplay through each
              libasound into a file with format, rate and channel conversion
-  probes     os/probes, both compilers here: the package's own compiler lines,
-             and tools/build_supervisor.py's for the supervisor and the thrash
-             guard (the composer's OS layer builds those); q2-abi-probe output
+  probes     os/probes, both compilers here, with the q2-probes package's own
+             compiler lines (the supervisor and the thrash guard included);
+             q2-abi-probe output
   chrony     the release os/network-time/build.py pins, both compilers here;
              its own unit tests and the configuration print of chronyd
   wpa        the image's wpa_supplicant 2.12 and wpa_cli: the SAE/PMF build of
@@ -38,15 +43,14 @@ Packages (default: all):
              4 terminal types, crypt hashes of 11 methods, zlib's example and
              minigzip, kexec -d -l of the release kernel; each library's
              exported symbols and versions. kexec needs --kernel-image.
-  fsck       fsck.exfat as tests/perf/build_storage_tools.py builds it
-             (exfatprogs 1.4.3, static); -V, -n on clean and damaged images,
-             -y restoring a boot sector
-  platform   libq2platform.so as tests/perf/build_platform_library.py builds
-             the shipped file (from the canonical checkout: the cwd is in the
-             debug companion the deployed file's CRC covers); the rotation of
-             q2_display_begin on generated frames into buffers of 4 pitches,
-             byte for byte against a model; error, page-flip, evdev and
-             clicker paths through pipes. The Q2 timing is
+  fsck       fsck.exfat from Buildroot's q2-exfat-fsck tree (exfatprogs
+             1.4.3, os/package/q2-exfat-fsck) made again (buildroot_make);
+             -V, -n on clean and damaged images, -y restoring a boot sector
+  platform   libq2platform.so with the q2-platform package's compiler line
+             (os/package/q2-platform), stripped as Buildroot strips; the
+             rotation of q2_display_begin on generated frames into buffers of
+             4 pitches, byte for byte against a model; error, page-flip, evdev
+             and clicker paths through pipes. The Q2 timing is
              q2-factory gates/perf/x2000_cost_device.py platform.
 
 --arms adds clang arms that separate causes in a Q2 A/B of busybox:
@@ -65,12 +69,12 @@ q2-factory gates/perf/x2000_cost_device.py applets.
 
 Hardening: first, the flags the SDK's GCC wrapper adds (stack protector,
 RELRO and BIND_NOW, PIE, reproducibility) are compared with what
-q2/toolchain/q2-x2000-cc adds, in 8 kinds of call; a difference stops the
+q2-x2000-cc adds, in 8 kinds of call; a difference stops the
 run. Each package then has a test that no clang file lacks a protection of
 its GCC file (os/x2000_c.py's admission refuses such a file too).
 
-Not rebuilt: glibc and libgcc (docs/x2000-toolchain.md: glibc's clang
-build is experimental and for aarch64 and x86_64 only).
+Not rebuilt: glibc and libgcc (glibc's clang build is experimental and
+for aarch64 and x86_64 only).
 """
 import argparse
 import hashlib
@@ -89,11 +93,11 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'tools'))
-import rig_config  # noqa: E402
-import x2000_toolchain  # noqa: E402
-
-WRAPPER = ROOT / 'q2/toolchain/q2-x2000-cc'
+EPOCH = json.loads((ROOT / 'os/sources.json').read_text())['source_date_epoch']
+# Set by main() from --toolchain-repo: that checkout's tools/x2000_toolchain.py
+# and q2/toolchain/q2-x2000-cc.
+x2000_toolchain = None
+WRAPPER = None
 EXTRA_ARMS = {'clang': '-march=mips32r2',
               'gensched': '-march=mips32r5 -mmsa -Xclang -target-feature -Xclang +x2000'}
 BUSYBOX_TESTS = [t.split('|') for t in [
@@ -128,10 +132,10 @@ class Context:
         self.sysroot = self.sdk / 'mipsel-buildroot-linux-gnu/sysroot'
         self.cross = str(self.sdk / 'bin/mipsel-buildroot-linux-gnu-')
         self.out = a.out
-        self.qemu = rig_config.path('qemu_user')
+        self.qemu = a.qemu_user
         self.extra = a.arms
         self.kernel = (a.kernel_image / 'vmlinux', a.kernel_image / 'shanling-q2.dtb') if a.kernel_image else None
-        self.env = {**os.environ, **x2000_toolchain.cargo_env(), 'Q2_SDK': str(self.sdk),
+        self.env = {**os.environ, **x2000_toolchain.cargo_env(sdk=self.sdk), 'Q2_SDK': str(self.sdk),
                     'PATH': f"{self.sdk / 'bin'}:{os.environ['PATH']}"}
         self.env.pop('RUSTC', None)
         self.rows, self.failed, self.skipped = [], False, []
@@ -209,6 +213,13 @@ def make_data(directory):
     (directory / 'data.xz').write_bytes(lzma.compress(data, preset=1))
 
 
+# Buildroot's TARGET_CFLAGS for os/configs/q2_defconfig (BR2_TIME_BITS_64,
+# -O2, no debug information, FORTIFY_SOURCE level 1): BusyBox's CFLAGS and the
+# $(TARGET_CFLAGS) of the q2-probes and q2-platform compiler lines.
+TARGET_CFLAGS = '-D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64 -O2 -g0 -D_FORTIFY_SOURCE=1'
+BUSYBOX_PATCHES = ROOT / 'os/patches/packages/busybox'
+
+
 def buildroot_tree(c, prefix):
     trees = sorted((c.br / 'build').glob(prefix + '-[0-9]*'))
     if len(trees) != 1:
@@ -217,39 +228,40 @@ def buildroot_tree(c, prefix):
 
 
 def busybox(c):
-    """The image's BusyBox: the cached Buildroot tree with the ash patch and the
-    blockdev applet, built as tests/perf/build_storage_tools.py builds the
-    shipped bin/busybox (same patch, configuration switch, make options,
-    CFLAGS and strip). The gcc arm is that build, so it can be compared with
-    the image's file; the x2000 arm differs only in CC."""
-    storage = load_module('build_storage_tools', ROOT / 'tests/perf/build_storage_tools.py')
+    """The image's BusyBox: Buildroot's configured tree, which already has the
+    ash patch (BR2_GLOBAL_PATCH_DIR) and os/busybox.fragment (the blockdev
+    applet), made again with Buildroot's make options, CFLAGS and strip. The
+    gcc arm is that build, so it can be compared with the image's file; the
+    x2000 arm differs only in CC."""
     out = c.out / 'busybox'
     source = buildroot_tree(c, 'busybox')
-    if sha256(source / '.config') != storage.CONFIG:
-        raise SystemExit(f'{source}: not the cached BusyBox configuration build_storage_tools.py reproduces')
+    config = (source / '.config').read_text().splitlines()
+    fragment = [line for line in (ROOT / 'os/busybox.fragment').read_text().splitlines() if line and not line.startswith('#')]
+    if any(line not in config for line in fragment):
+        raise SystemExit(f'{source}: configuration without os/busybox.fragment')
+    applied = (source / '.applied_patches_list').read_text() if (source / '.applied_patches_list').is_file() else ''
+    patches = sorted(BUSYBOX_PATCHES.glob('*.patch'))
+    if any(p.name not in applied for p in patches):
+        raise SystemExit(f'{source}: tree without the patches in {BUSYBOX_PATCHES.relative_to(ROOT)}')
     binaries = {}
-    env = {'SOURCE_DATE_EPOCH': str(storage.EPOCH), 'KCONFIG_NOTIMESTAMP': '1', 'CFLAGS': storage.CFLAGS,
+    env = {'SOURCE_DATE_EPOCH': str(EPOCH), 'KCONFIG_NOTIMESTAMP': '1', 'CFLAGS': TARGET_CFLAGS,
            'CFLAGS_busybox': '', 'LC_ALL': 'C', 'TZ': 'UTC'}
     for arm, (cc, arm_env) in {'gcc': (c.cross + 'gcc', {}), **c.arms()}.items():
         tree = out / f'src-{arm}'
         shutil.copytree(source, tree, symlinks=True)
-        subprocess.run(['patch', '-p1', '-i', str(storage.PATCH)], cwd=tree, check=True, stdout=subprocess.DEVNULL, timeout=30)
-        text = (tree / '.config').read_text()
-        if text.splitlines().count(storage.CONFIG_OFF) != 1:
-            raise SystemExit('cached BusyBox configuration without the blockdev line')
-        (tree / '.config').write_text(text.replace(storage.CONFIG_OFF + '\n', storage.CONFIG_ON + '\n'))
         common = (f'ARCH=mips CROSS_COMPILE={c.cross} CC={cc} AR={c.cross}ar NM={c.cross}nm RANLIB={c.cross}ranlib '
                   'SKIP_STRIP=y EXTRA_LDFLAGS=-Wl,-z,noexecstack CONFIG_PREFIX=/unused HOSTCC=gcc')
-        c.sh(f'make {common} oldconfig < /dev/null && make {common} clean && make -j{os.cpu_count()} {common} all busybox.links',
+        c.sh(f'make {common} clean && make -j{os.cpu_count()} {common} all busybox.links',
              tree, out / f'build-{arm}.log', {**env, **arm_env})
         if not any(line.endswith('/blockdev') for line in (tree / 'busybox.links').read_text().splitlines()):
             raise SystemExit(f'busybox {arm}: no blockdev applet')
         binaries[arm] = out / arm / 'busybox'
         c.strip(tree / 'busybox_unstripped', binaries[arm])
         shutil.rmtree(tree)
-    c.notes['busybox'] = {'patch_sha256': sha256(storage.PATCH), 'config_sha256': storage.CONFIG,
-                          'config_switch': storage.CONFIG_ON, 'cflags': storage.CFLAGS,
-                          'buildroot_target_sha256': sha256(c.br / 'target/bin/busybox')}
+    target = sha256(c.br / 'target/bin/busybox')
+    c.notes['busybox'] = {'patches_sha256': {p.name: sha256(p) for p in patches}, 'config_sha256': sha256(source / '.config'),
+                          'cflags': TARGET_CFLAGS, 'buildroot_target_sha256': target,
+                          'gcc_is_buildroot_target': sha256(binaries['gcc']) == target}
     data = out / 'data'
     make_data(data)
     stdin = (data / 'data').read_bytes()[:65536]
@@ -548,40 +560,15 @@ def kexec(c):
 
 
 def fsck_exfat(c):
-    """fsck.exfat as tests/perf/build_storage_tools.py builds the shipped one:
-    exfatprogs 1.4.3's fsck and lib files compiled directly, static, in the
-    q2-os-build container with the SDK at /work/build/os/out and the build
-    under /probe, stripped as Buildroot strips. Tests: -V; -n on a clean
-    image from the host's mkfs.exfat; -n on a copy with a damaged boot
-    region; -y on that copy (the repaired image's bytes compared)."""
-    storage = load_module('build_storage_tools', ROOT / 'tests/perf/build_storage_tools.py')
+    """fsck.exfat as the image's q2-exfat-fsck package builds it: Buildroot's
+    configured exfatprogs tree, its lib and fsck directories made again
+    (buildroot_make). Tests: -V; -n on a clean image from the host's
+    mkfs.exfat; -n on a copy with a damaged boot region; -y on that copy
+    (the repaired image's bytes compared)."""
+    built = buildroot_make(c, 'fsck', 'q2-exfat-fsck', {'fsck.exfat': 'fsck/fsck.exfat'}, ('lib', 'fsck'))
+    buildroot_shipped(c, 'fsck', built, {'fsck.exfat': 'usr/sbin/fsck.exfat'})
+    files = {arm: f['fsck.exfat'] for arm, f in built.items()}
     out = c.out / 'fsck'
-    tarball = storage.fetch()
-    cross = '/work/build/os/out/host/bin/mipsel-buildroot-linux-gnu-'
-    files = {}
-    for arm, (cc, env) in {'gcc': (cross + 'gcc', {}), **c.arms()}.items():
-        work = out / f'src-{arm}'
-        (work / 'exfatprogs').mkdir(parents=True)
-        with tarfile.open(tarball) as archive:
-            archive.extractall(work / 'exfatprogs', filter='data')
-        build = work / 'exfatprogs/build-a'
-        build.mkdir()
-        (build / 'config.h').write_text(storage.CONFIG_H)
-        objects, script = [], []
-        for name in storage.FSCK_SOURCES:
-            obj = name.replace('/', '_').replace('.c', '.o')
-            objects.append(obj)
-            script.append(f'{cc} {storage.CFLAGS} -Wall -include config.h -I. -I../{storage.EXFATPROGS}/include -fno-common '
-                          f'-c ../{storage.EXFATPROGS}/{name} -o {obj}')
-        script.append(f'{cc} -static -Wl,-z,noexecstack -o fsck.exfat.unstripped {" ".join(objects)}')
-        script.append(f'{cross}strip --remove-section=.comment --remove-section=.note -o fsck.exfat fsck.exfat.unstripped')
-        c.container([(c.br, '/work/build/os/out', False), (work, '/probe', True)], '/probe/exfatprogs/build-a', '\n'.join(script),
-                    out / f'build-{arm}.log', {'Q2_SDK': '/work/build/os/out/host', 'SOURCE_DATE_EPOCH': str(storage.EPOCH), **env})
-        files[arm] = out / arm / 'fsck.exfat'
-        files[arm].parent.mkdir(parents=True)
-        shutil.copy2(build / 'fsck.exfat', files[arm])
-        shutil.rmtree(work)
-    c.notes['fsck'] = {'recipe': 'tests/perf/build_storage_tools.py', 'tarball_sha256': storage.EXFATPROGS_SHA}
     work = out / 'work'
     work.mkdir()
     results = {arm: c.run(f, ['-V']) for arm, f in files.items()}
@@ -779,54 +766,52 @@ pcm.conv {{ type plug slave {{ pcm sink format {out_fmt} rate {out_rate} channel
 
 
 def probes(c):
-    """os/probes as the image builds them. Seven programs with the q2-probes
-    package's own lines (the Buildroot target's copies are compared too);
-    the player supervisor and the thrash guard, which the release composer
-    rebuilds into every image (its OS layer), with tools/build_supervisor.py's
-    command: the same flags, run from this checkout, unstripped. Both arms
-    compile this checkout's sources."""
-    supervisor = load_module('build_supervisor', ROOT / 'tools/build_supervisor.py')
-    composed = {'q2-player-supervisor': supervisor.SOURCE, 'q2-memory-guard': supervisor.MEMORY_GUARD}
+    """os/probes as the image builds them: every program with the q2-probes
+    package's own compiler lines (os/package/q2-probes/q2-probes.mk), stripped
+    as Buildroot strips; the Buildroot target's copies are compared too. Both
+    arms compile this checkout's sources."""
     out = c.out / 'probes'
-    mk = (ROOT / 'os/package/q2-probes/q2-probes.mk').read_text()
-    block = mk.split('define Q2_PROBES_BUILD_CMDS', 1)[1].split('endef', 1)[0].replace('\\\n', ' ')
     binaries = {}
-    cflags = '-D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64 -O2 -g0 -D_FORTIFY_SOURCE=1'
     names = []
     for arm, (cc, env) in {'gcc': (c.cross + 'gcc', {}), **c.arms()}.items():
         tree = out / f'src-{arm}'
         shutil.copytree(ROOT / 'os/probes', tree, ignore=shutil.ignore_patterns('rust'))
         binaries[arm] = out / arm
         binaries[arm].mkdir(parents=True)
-        for line in block.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            command = line.replace('$(TARGET_CC)', cc).replace('$(TARGET_CFLAGS)', cflags).replace('$(TARGET_LDFLAGS)', '-Wl,-z,noexecstack').replace('$(@D)', str(tree))
-            name = re.search(r'\s-o\s+(\S+)', command).group(1)
-            if Path(name).name in composed:
-                continue
+        for command, name in package_lines(c, 'q2-probes', cc, tree):
             c.sh(command, tree, out / f'build-{arm}.log', env)
             c.strip(name, binaries[arm] / Path(name).name)
             if arm == 'gcc':
                 names.append(Path(name).name)
         shutil.rmtree(tree)
-        for name, source in composed.items():
-            c.sh(' '.join([cc, *supervisor.FLAGS, '-o', str(binaries[arm] / name), str(source)]), ROOT, out / f'build-{arm}.log', env)
-            if arm == 'gcc':
-                names.append(name)
     target = {}
     for name in names:
         installed = next((p for p in (c.br / 'target').rglob(name) if p.is_file()), None)
         target[name] = {'buildroot_target_sha256': sha256(installed) if installed else None,
                         'gcc_is_buildroot_target': bool(installed) and sha256(installed) == sha256(binaries['gcc'] / name)}
     c.notes['probes'] = {'sources': {p.name: sha256(p) for p in sorted((ROOT / 'os/probes').glob('*.c'))},
-                         'supervisor_flags': supervisor.FLAGS, 'programs': target}
+                         'cflags': TARGET_CFLAGS, 'programs': target}
     results = {arm: c.run(directory / 'q2-abi-probe', []) for arm, directory in binaries.items()}
     c.record('probes', f'q2-abi-probe output ({len(names)} programs compiled with -Wall -Wextra -Werror)',
              {arm: (p.returncode, p.stdout) for arm, p in results.items()},
              ran=all(p.returncode == 0 and p.stdout for p in results.values()))
     return {arm: directory / 'q2-abi-probe' for arm, directory in binaries.items()}
+
+
+def package_lines(c, package, cc, tree):
+    """The compiler lines of os/package/PACKAGE/PACKAGE.mk's BUILD_CMDS with
+    CC, TARGET_CFLAGS, TARGET_LDFLAGS and $(@D) filled in: [(command, output)]."""
+    mk = (ROOT / f'os/package/{package}/{package}.mk').read_text()
+    variable = package.upper().replace('-', '_')
+    block = mk.split(f'define {variable}_BUILD_CMDS', 1)[1].split('endef', 1)[0].replace('\\\n', ' ')
+    lines = []
+    for line in block.splitlines():
+        line = line.strip()
+        if line:
+            command = (line.replace('$(TARGET_CC)', cc).replace('$(TARGET_CFLAGS)', TARGET_CFLAGS)
+                       .replace('$(TARGET_LDFLAGS)', '-Wl,-z,noexecstack').replace('$(@D)', str(tree)))
+            lines.append((command, re.search(r'\s-o\s+(\S+)', command).group(1)))
+    return lines
 
 
 def fetch(url, sha, target):
@@ -885,8 +870,7 @@ def chrony(c):
     return binaries
 
 
-# The configuration test's networks, in the forms tests/perf/wpa3_qualify.py
-# writes (SAE, transition, WPA2), and an open one.
+# The configuration test's networks: SAE, transition, WPA2 and open.
 WPA_CONFIG = '''ctrl_interface=DIR=CTRLDIR
 update_config=0
 sae_pwe=2
@@ -1187,66 +1171,48 @@ PLATFORM_CASES = [('zero and all-ones', 1280), ('index', 1280), ('random', 1280)
                   ('gradient', 1280), ('random', 1284), ('index', 1344), ('random', 2048)]
 
 
-def canonical_checkout():
-    return Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-                                        text=True).strip()).parent
-
-
 def platform(c):
-    """libq2platform.so as tests/perf/build_platform_library.py builds the
-    shipped file: its flags and sources, frozen under one directory that
-    -ffile-prefix-map names /q2-platform, compiled from the canonical
-    checkout (the cwd is DW_AT_comp_dir, so it is in the debug companion
-    whose CRC the deployed file carries), linked with its line and stripped
-    with a debug link by tools/elf_symbols.py. The gcc arm is V0.130's
-    usr/lib/libq2platform.so (06d38cac) byte for byte. The test program
+    """libq2platform.so with the q2-platform package's compiler line
+    (os/package/q2-platform/q2-platform.mk) and Buildroot's strip; the gcc arm
+    is compared with the Buildroot target's file. The test program
     os/x2000-c-tests/platform.c is built once with GCC and run with each
     arm's library: q2_display_begin with scanout disabled rotating two
     frames into buffers of 4 pitches (8 cases, compared with
     platform_rotation byte for byte), the error, page-flip, evdev and
     clicker paths through pipes (PLATFORM_API), and its bench mode, which
     q2-factory gates/perf/x2000_cost_device.py platform times on the Q2."""
-    builder = load_module('build_platform_library', ROOT / 'tests/perf/build_platform_library.py')
-    symbols = load_module('elf_symbols', ROOT / 'tools/elf_symbols.py')
     out = c.out / 'platform'
-    frozen = out / 'source'
-    frozen.mkdir(parents=True)
-    for relative in builder.SOURCES:
-        shutil.copyfile(ROOT / relative, frozen / Path(relative).name)
-    cwd = canonical_checkout()
-    env = {'LC_ALL': 'C', 'SOURCE_DATE_EPOCH': '1793404800'}
+    sources = ROOT / 'os/platform'
     files = {}
-    for arm, (cc, arm_env) in {'gcc': (c.cross + 'gcc', {}), **c.arms()}.items():
-        work, log = out / f'build-{arm}', out / f'build-{arm}.log'
-        work.mkdir()
-        objects = []
-        for stem in ('display', 'input'):
-            objects.append(work / (stem + '.o'))
-            c.sh(shlex.join([cc, *builder.FLAGS, f'-ffile-prefix-map={frozen}=/q2-platform', '-MD', '-MF', str(work / (stem + '.d')),
-                             '-c', str(frozen / (stem + '.c')), '-o', str(objects[-1])]), cwd, log, {**env, **arm_env})
-        full = work / 'libq2platform.full.so'
-        c.sh(shlex.join([cc, '-shared', *map(str, objects), '-Wl,-z,noexecstack', '-Wl,--build-id', '-o', str(full)]), cwd, log,
-             {**env, **arm_env})
-        (out / arm).mkdir()
-        symbols.preserve(full, out / arm / 'libq2platform.so', out / arm / 'symbols', c.cross,
-                         {'source_inputs': {p: sha256(ROOT / p) for p in builder.SOURCES}, 'compiler': cc, 'arm': arm})
+    for arm, (cc, env) in {'gcc': (c.cross + 'gcc', {}), **c.arms()}.items():
+        tree = out / f'src-{arm}'
+        shutil.copytree(sources, tree)
+        (out / arm).mkdir(parents=True)
+        for command, name in package_lines(c, 'q2-platform', cc, tree):
+            if Path(name).name == 'libq2platform.so':
+                c.sh(command, tree, out / f'build-{arm}.log', env)
+                c.strip(name, out / arm / 'libq2platform.so')
         files[arm] = {'libq2platform.so': out / arm / 'libq2platform.so'}
-        shutil.rmtree(work)
+        shutil.rmtree(tree)
     rotation = {}
     for arm, f in files.items():
         text = subprocess.run([c.cross + 'objdump', '-d', '--disassemble=q2_display_begin', str(f['libq2platform.so'])],
                               capture_output=True, text=True, check=True).stdout
         rotation[arm] = sum(1 for line in text.splitlines() if '$w' in line)
-    c.notes['platform'] = {'source_inputs': {p: sha256(ROOT / p) for p in builder.SOURCES}, 'flags': builder.FLAGS,
-                           'comp_dir': str(cwd), 'q2_display_begin_msa_instructions': rotation}
+    target = sha256(c.br / 'target/usr/lib/libq2platform.so')
+    c.notes['platform'] = {'source_inputs': {p.name: sha256(p) for p in sorted(sources.glob('*.[ch]'))}, 'cflags': TARGET_CFLAGS,
+                           'buildroot_target_sha256': target,
+                           'gcc_is_buildroot_target': sha256(files['gcc']['libq2platform.so']) == target,
+                           'q2_display_begin_msa_instructions': rotation}
     exported_symbols(c, 'platform', files)
     test = out / 'test'
     test.mkdir()
-    text = (frozen / 'display.c').read_text()
+    text = (sources / 'display.c').read_text()
     start, end = text.index('struct buffer {'), text.index('};', text.index('struct display {')) + 2
     (test / 'platform-display.h').write_text('/* display.c\'s structs, copied by os/x2000-c-build.py */\n' + text[start:end] + '\n')
     program = test / 'platform'
-    subprocess.run([c.cross + 'gcc', *builder.FLAGS, '-I', str(test), '-I', str(frozen), '-o', str(program), str(TESTS / 'platform.c'),
+    subprocess.run([c.cross + 'gcc', *TARGET_CFLAGS.split(), '-Wall', '-Wextra', '-Werror', '-I', str(test), '-I', str(sources),
+                    '-o', str(program), str(TESTS / 'platform.c'),
                     '-L', str(out / 'gcc'), '-lq2platform'], check=True)
     dirs = {arm: out / arm for arm in files}
     for content, pitch in PLATFORM_CASES:
@@ -1329,8 +1295,27 @@ PACKAGES = {'busybox': busybox, 'dropbear': dropbear, 'alsa-lib': alsa_lib, 'pro
             'kexec': kexec, 'fsck': fsck_exfat, 'platform': platform}
 
 
+def load_toolchain(ap, repo, compiler_work):
+    """The q2-toolchain checkout's x2000_toolchain module (with Q2_X2000_WORK
+    set to compiler_work) and its q2-x2000-cc, into the module globals."""
+    global x2000_toolchain, WRAPPER
+    path = repo / 'tools/x2000_toolchain.py'
+    if not path.is_file() or not (repo / 'q2/toolchain/q2-x2000-cc').is_file():
+        ap.error(f'{repo}: not a q2-toolchain checkout')
+    os.environ['Q2_X2000_WORK'] = str(compiler_work.resolve())
+    x2000_toolchain = load_module('x2000_toolchain', path)
+    WRAPPER = repo / 'q2/toolchain/q2-x2000-cc'
+    x2000_toolchain.installed()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--toolchain-repo', type=Path, required=True,
+                    help='q2-toolchain checkout: tools/x2000_toolchain.py and q2/toolchain/q2-x2000-cc')
+    ap.add_argument('--compiler-work', type=Path, required=True,
+                    help='its built X2000 compiler (Q2_X2000_WORK, the directory with install/)')
+    ap.add_argument('--qemu-user', type=Path, default=ROOT / 'build/qemu/qemu-mipsel-static',
+                    help='qemu-mipsel user-mode binary that runs both builds')
     ap.add_argument('--buildroot-out', type=Path, required=True, help='Buildroot output directory (build/, host/, target/)')
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--arms', nargs='*', default=[], choices=sorted(EXTRA_ARMS), help='extra clang arms')
@@ -1345,7 +1330,10 @@ def main():
         ap.error('kexec needs --kernel-image DIR with vmlinux and shanling-q2.dtb')
     if a.kernel_image:
         a.kernel_image = a.kernel_image.resolve()
-    rig_config.require('qemu_user')
+    if not a.qemu_user.is_file():
+        ap.error(f'{a.qemu_user}: no qemu-user binary; pass --qemu-user')
+    a.qemu_user = a.qemu_user.resolve()
+    load_toolchain(ap, a.toolchain_repo.resolve(), a.compiler_work)
     a.out.mkdir(parents=True, exist_ok=False)
     c = Context(a)
     wrapper_flags(c)
@@ -1362,7 +1350,8 @@ def main():
               'toolchain': {'rustc_version': receipt.get('rustc_version'), 'files': receipt.get('files'),
                             'wrapper_sha256': sha256(WRAPPER)},
               'source_commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
-              'source_dirty': bool(subprocess.check_output(['git', '-C', str(ROOT), 'status', '--porcelain', '--', 'os', 'q2/toolchain', 'tools', 'tests/perf'], text=True).strip()),
+              'source_dirty': bool(subprocess.check_output(['git', '-C', str(ROOT), 'status', '--porcelain', '--', 'os'], text=True).strip()),
+              'toolchain_commit': subprocess.check_output(['git', '-C', str(WRAPPER.parents[2]), 'rev-parse', 'HEAD'], text=True).strip(),
               'buildroot_out': str(a.buildroot_out), 'notes': c.notes}
     (a.out / 'result.json').write_text(json.dumps(result, indent=1) + '\n')
     print(f"{'FAILED' if c.failed else 'passed'}: {sum(r['same'] and r['ran'] for r in c.rows)} of {len(c.rows)} tests")

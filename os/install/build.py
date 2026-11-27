@@ -2,6 +2,7 @@
 """Build an isolated install candidate. Never opens hardware or stages/flashes it."""
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -40,7 +41,6 @@ def sha(path):
 
 import bluetooth_firmware as bt_firmware
 BLUETOOTH_FIRMWARE = bt_firmware.FILES
-BLUETOOTH_PATCH = bt_firmware.PATCH
 
 def bluetooth_firmware(directory, root):
     """Install the two verified files; return their hashes for the manifest."""
@@ -59,15 +59,26 @@ def stock_bluetooth_firmware(directory, root):
     return hashes, source
 
 
-def install_x2000_c(result_dir, root):
-    """Replace GCC-built programs in `root` with the tested X2000-clang builds (os/x2000_c.py)."""
-    sys.path.insert(0, str(ROOT / 'tools'))
-    import x2000_toolchain
-    return x2000_c.install(result_dir, root, x2000_toolchain.patch_identity())
+def toolchain_identity(repo):
+    """patch_identity() of a q2-toolchain checkout's tools/x2000_toolchain.py:
+    the X2000 compiler sources that checkout pins."""
+    path = Path(repo) / 'tools/x2000_toolchain.py'
+    if not path.is_file():
+        raise ValueError(f'{repo}: not a q2-toolchain checkout')
+    spec = importlib.util.spec_from_file_location('x2000_toolchain', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.patch_identity()
 
 
-# The device owner, 2026-11-22: the image ships exactly one Tailscale daemon, tailscale-rs
-# by default; the Go tailscaled stays a build option (os/install/README.md).
+def install_x2000_c(result_dir, root, toolchain_repo):
+    """Replace GCC-built programs in `root` with the tested X2000-clang builds
+    (os/x2000_c.py), built with the compiler `toolchain_repo` pins."""
+    return x2000_c.install(result_dir, root, toolchain_identity(toolchain_repo))
+
+
+# The image ships exactly one Tailscale daemon: tailscale-rs by default, the Go
+# tailscaled as a build option (os/install/README.md).
 TAILSCALE_DAEMONS = ('rs', 'go')
 
 
@@ -112,7 +123,9 @@ def main():
     p.add_argument('--x2000-c', type=Path,
                    help='os/x2000-c-build.py output for this Buildroot tree: its X2000-clang programs replace the GCC ones in the '
                         'installed root where their output tests passed and their GCC control is the installed file '
-                        '(os/x2000_c.py, docs/x2000-toolchain.md). The rescue image keeps GCC.')
+                        '(os/x2000_c.py). The rescue image keeps GCC. Needs --toolchain-repo.')
+    p.add_argument('--toolchain-repo', type=Path,
+                   help='with --x2000-c: the q2-toolchain checkout whose pinned X2000 compiler built it')
     p.add_argument('--root-compression', choices=sorted(root_compression.SETTINGS), default=root_compression.DEFAULT,
                    help='root SquashFS setting; the built kernel must read it')
     p.add_argument('--bluetooth-firmware', type=Path,
@@ -147,6 +160,8 @@ def main():
             tsrs_binary, tsrsd = tsrs_artifact.admit(a.tsrsd, selected_tsrs)
         except (OSError, ValueError) as error:
             p.error(str(error))
+    if a.x2000_c is not None and a.toolchain_repo is None:
+        p.error('--x2000-c needs --toolchain-repo')
     if a.packaging_profile == 'production' and a.strip_tool is None:
         p.error('--strip-tool is required for production packaging')
     try:
@@ -221,7 +236,7 @@ def main():
             bluetooth, bluetooth_source = stock_bluetooth_firmware(a.bluetooth_firmware, root)
         else:
             bluetooth = bluetooth_firmware(a.bluetooth_firmware, root)
-    x2000_record = install_x2000_c(a.x2000_c, root) if a.x2000_c else None
+    x2000_record = install_x2000_c(a.x2000_c, root, a.toolchain_repo) if a.x2000_c else None
     runtime_resource_hashes = runtime_resources.validate(root, app_source)
     packaging = {'packaging_profile': 'development', 'transform': 'none'}
     if a.packaging_profile == 'production':

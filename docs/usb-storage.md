@@ -96,7 +96,10 @@ The helper accepts only these layouts and checks them again on return:
    cannot reach the card.
 4. Flush the block caches and mount the card. If its exFAT VolumeDirty flag
    is set and `fsck.exfat -n` fails, it is mounted read-only and
-   `/run/q2/card-readonly` is created.
+   `/run/q2/card-readonly` is created. The image's `fsck.exfat` comes from
+   the `q2-exfat-fsck` package (exfatprogs 1.4.3). On an image without it, a
+   dirty card is mounted writable without a check, `/run/q2/card-unchecked`
+   is created and the helper says so on stderr.
 5. Restore the RAM profile's state image, or check the internal state is the
    saved one; set `ready` and restart the player (or hold it with
    `--defer-restart`). The installed player restarts to reload the
