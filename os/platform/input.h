@@ -3,9 +3,12 @@
 #include <stdint.h>
 struct q2_input_event { int64_t seconds; int32_t microseconds; uint16_t type, code; int32_t value; };
 struct q2_input_state { int32_t position, touch; uint32_t keys; };
+struct q2_touchscreen_state { int32_t x, y, pressure; };
 int q2_input_open(int kind, int monotonic);
 int q2_input_state(int fd, int kind, struct q2_input_state *state);
 int q2_input_read(int fd, struct q2_input_event *event);
+int q2_touchscreen_open(const char *path);
+int q2_touchscreen_state(int fd, struct q2_touchscreen_state *state);
 unsigned q2_input_event_size(void);
 unsigned q2_input_bridge_size(void);
 int q2_clicker_open(void);

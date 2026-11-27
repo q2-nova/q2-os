@@ -27,6 +27,14 @@ with tempfile.TemporaryDirectory(prefix='sdk-relocation-', dir=WORK) as director
     run([cc, '-D_TIME_BITS=64',
          '-D_FILE_OFFSET_BITS=64', source, '-o', sdk / 'probe'])
     report['elf'] = elf(sdk / 'probe')
+    library = sysroot / 'usr/lib/libq2platform.so'
+    nm = sdk / 'bin/mipsel-buildroot-linux-gnu-nm'
+    symbols = {line.split()[-1] for line in subprocess.check_output(
+        [nm, '-D', '--defined-only', library], text=True).splitlines() if line.split()}
+    touchscreen = {'q2_touchscreen_open', 'q2_touchscreen_state'}
+    if not touchscreen <= symbols:
+        raise SystemExit('exported SDK platform bridge lacks touchscreen ABI')
+    report['platform_touchscreen_symbols'] = sorted(touchscreen)
     report['sysroot_is_relocated'] = True
     report['passed'] = True
 (WORK / 'sdk-test.json').write_text(json.dumps(report, indent=2) + '\n')
