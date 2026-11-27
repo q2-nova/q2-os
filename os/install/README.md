@@ -258,6 +258,20 @@ their independent build paths.
 The stock image still requires recovery and first-install hardware
 qualification.
 
+For distribution, export the corresponding radio materials from the same
+stock image and its retained radio kit. The exporter reads back the shipped
+radio binaries, reproduces the static libnl links, and includes the patched
+Realtek driver and vendor notices.
+
+```sh
+python3 os/export_stock_radio.py --stock-inputs build/os/stock-inputs-01 \
+  --image build/os/stock-candidate-01 --sdk RELOCATED_SDK \
+  --output build/stock-radio-source.tar.gz
+```
+
+Attach that archive alongside the stock firmware and include it in the
+release checksums. See the [radio source and relink guide](../../docs/stock-radio-source.md).
+
 The stock kit also places the Buildroot-pinned ISC wireless regulatory
 database and its detached kernel signature in the rescue and installed
 roots. It retains the upstream license and leaves country selection to the
