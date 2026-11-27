@@ -1,6 +1,15 @@
 # Q2 operating system
 
-This repository owns the Q2 Buildroot external tree, userspace, provisioning, platform library and recovery assembly. The Buildroot fork owns changes to Buildroot itself. The Linux fork contains the production kernel source.
+The Shanling Q2 is a portable music player. This repository builds the Linux
+system that runs the [Q2 player app](https://github.com/q2-nova/q2-player). It
+supplies the device's base software and recovery environment, a library for
+accessing its hardware, and a software development kit (SDK) for building
+programs that run on it.
+
+If you're building software for the Q2, start with [the SDK
+guide](#build-and-test-the-sdk). The [releases
+page](https://github.com/q2-nova/q2-os/releases) hosts component prereleases for
+developers. A stock-device first-install download is still in development.
 
 ## Build and test the SDK
 
@@ -16,7 +25,7 @@ The builder fetches the exact public Buildroot commit in `os/sources.json` and c
 
 The SDK archive is `build/os/out/images/mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz`. The test relocates the SDK in a temporary directory, compiles and links a time64 C program, and records its ELF ABI in `build/os/sdk-test.json`.
 
-The SDK build uses generated emulator fixtures. For a player-enabled emulator build, supply both a matching `q2nd` and `q2-launcher` in `build/os/out/artifacts/`. The emulator uses a separate public QEMU compatibility revision and its own pinned kernel series. The stock-device installation recipes still need a distributable first-owner identity and rescue strategy.
+The SDK build uses generated emulator fixtures. For a player-enabled emulator build, supply both a matching `q2nd` and `q2-launcher` in `build/os/out/artifacts/`. The emulator uses a separate public QEMU compatibility revision and its own pinned kernel series. See the [installation build guide](os/install/README.md) for stock-device image assembly and its validation requirements.
 
 ## Licensing
 
