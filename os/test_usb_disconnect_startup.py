@@ -86,7 +86,7 @@ main "$@"
 
     def test_root_init_waits_for_service_admission_before_usb_watcher(self):
         source = (ROOT / 'os/install/root-init').read_text()
-        begin = source.index('if [ "$peripherals_ready" = 1 ]; then')
+        begin = source.index('if [ "$peripherals_ready" = 1 ] && [ "$telemetry_ready" = 1 ]; then')
         stage = source[begin:source.index('echo Q2_INSTALLED_ROOT_READY', begin)]
         service = self.root / 'installed-services'
         service.write_text('''#!/bin/sh
@@ -101,7 +101,7 @@ main "$@"
         auto.chmod(0o755)
         stage = stage.replace('/sbin/q2-player-bringup', 'true').replace('/sbin/q2-installed-services', str(service)).replace('/usr/sbin/q2-usb-auto', str(auto)).replace('/run/log', str(self.root / 'log'))
         driver = self.root / 'init-stage'
-        driver.write_text('#!/bin/sh\nperipherals_ready=1\nbootmark() { :; }\n' + stage)
+        driver.write_text('#!/bin/sh\nperipherals_ready=1\ntelemetry_ready=1\nbootmark() { :; }\n' + stage)
         init = self.spawn('sh', str(driver))
         self.entered()
         self.assertNotIn('auto-start', self.case.events.read_text())

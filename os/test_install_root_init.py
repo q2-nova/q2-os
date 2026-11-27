@@ -56,7 +56,8 @@ loopback_setup
             self.assertLess(configured, text.index(command))
         self.assertIn('if [ "$loopback_ready" = 1 ]; then', text)
         self.assertLess(text.index('peripherals_pid=$!'), text.index('wait "$peripherals_pid"'))
-        self.assertLess(text.index('wait "$peripherals_pid"'), text.index('if [ "$peripherals_ready" = 1 ]; then'))
+        self.assertLess(text.index('wait "$peripherals_pid"'),
+                        text.index('if [ "$peripherals_ready" = 1 ] && [ "$telemetry_ready" = 1 ]; then'))
         self.assertIn('diagnostics retained', text)
 
 
