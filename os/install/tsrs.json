@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/q2-nova/tsrs.git",
+  "source_commit": "048d0727b41df784b96b758e5cb5e528598be0b4",
+  "tailscale_rs_commit": "e88a60083ed2b9b2b8fd62733fe86ea887e72780",
+  "patch_sha256": "d35c5c6061bd7e7393caec322bfd4855f684c5082361cde9a22eca63fa569114"
+}

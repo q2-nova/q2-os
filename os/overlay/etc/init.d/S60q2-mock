@@ -1,0 +1,7 @@
+#!/bin/sh
+# This server only serves generated fixtures, on the guest's loopback interface.
+grep -qw q2.diagnostic=1 /proc/cmdline || exit 0
+case "$1" in
+    start) httpd -p 127.0.0.1:4533 -h /usr/share/q2-fixtures ;;
+    stop) killall httpd 2>/dev/null || : ;;
+esac

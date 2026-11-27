@@ -1,0 +1,45 @@
+From 141e03db7498e0c50dc035d2005a76685863875e Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 11:23:00 -0500
+Subject: [PATCH 09/10] mtd: spinand: add vendor-derived Dosilicon DS35Q2GA
+ geometry
+
+Add the E5/72 device used by the Q2 emulator: 2048+64-byte pages,
+64 pages per eraseblock, 2048 blocks and two planes selected with column
+bit 12. Reuse the DS35Q1GA OOB layout and standard four-bit ECC status.
+
+The stock V1.32 dosilicon_param record at 0x80b30bd0 confirms page/block/
+OOB/flash sizes, plane selection, ECC strength and quad mode. This agrees
+with the SDK ingenic_sfc_v2/nand_device/dosilicon_nand.c at DiamondBond
+revision 655f42c032402719881ff2a1b801bd797dc514c1.
+
+The maximum factory bad-block count is absent from this evidence. Leave
+it unspecified (zero, causing max_bad_blocks to return -ENOTSUPP) rather
+than inventing a device guarantee. Bad-block/ECC injection and physical
+OOB validation remain untested. Emulator erase/program/readback passes
+across consecutive blocks on both planes.
+---
+ drivers/mtd/nand/spi/dosilicon.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/mtd/nand/spi/dosilicon.c b/drivers/mtd/nand/spi/dosilicon.c
+index f99899866..54d270d15 100644
+--- a/drivers/mtd/nand/spi/dosilicon.c
++++ b/drivers/mtd/nand/spi/dosilicon.c
+@@ -68,6 +68,16 @@ static const struct spinand_info dosilicon_spinand_table[] = {
+ 					 &update_cache_variants),
+ 		SPINAND_HAS_QE_BIT,
+ 		SPINAND_ECCINFO(&ds35xx_ooblayout, NULL)),
++	SPINAND_INFO("DS35Q2GA",
++		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0x72),
++		/* Vendor geometry; maximum factory bad-block count is unknown. */
++		NAND_MEMORG(1, 2048, 64, 64, 2048, 0, 2, 1, 1),
++		NAND_ECCREQ(4, 512),
++		SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
++					 &write_cache_variants,
++					 &update_cache_variants),
++		SPINAND_HAS_QE_BIT,
++		SPINAND_ECCINFO(&ds35xx_ooblayout, NULL)),
+ 	SPINAND_INFO("DS35M1GA",
+ 		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0x21),
+ 		NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),

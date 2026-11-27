@@ -1,0 +1,63 @@
+#!/bin/sh
+RUN=/run/q2nd
+APP=/state/app
+# A paired OS trial must execute the binary from its candidate root. Keep the
+# persistent baseline app and its rollback files untouched by this one-shot.
+if grep -q 'q2.bundle=' /proc/cmdline; then APP=/run/q2-bundle-app; fi
+case "$1" in
+    start)
+        [ "$(cat /run/q2/state-status 2>/dev/null)" = ready ] || { echo 'Q2_PLAYER=state-unavailable'; exit 0; }
+        [ -x /usr/bin/q2nd ] || { echo 'Q2_PLAYER=not-installed'; exit 0; }
+        if [ -s "$RUN/launcher.pid" ] && kill -0 "$(cat "$RUN/launcher.pid")" 2>/dev/null; then
+            exit 0
+        fi
+        mkdir -p "$APP" "$RUN"
+        if [ ! -f "$APP/player" ]; then
+            # A reset during first boot must not publish a partial executable.
+            # Flush contents before rename, then persist the directory change.
+            cp /usr/bin/q2nd "$APP/.player-seed" && chmod 755 "$APP/.player-seed" &&
+                sync && mv "$APP/.player-seed" "$APP/player" && sync || exit 1
+        fi
+        platform=mainline
+        if grep -qw q2.diagnostic=1 /proc/cmdline; then
+            platform=headless
+        else
+            [ -S "$RUN/health.sock" ] || /etc/init.d/S79q2-supervisor start
+            [ ! -e "$RUN/rescue" ] || { echo Q2_PLAYER=rescue; exit 0; }
+            export Q2ND_CLOCK_STATUS=/run/q2/clock-status
+            [ ! -f /state/trust/navidrome-ca.der ] || export Q2ND_TLS_CA=/state/trust/navidrome-ca.der
+            export Q2ND_HEALTH_SOCKET="$RUN/health.sock" Q2ND_REQUIRE_HEALTH=1
+            grep -qw q2.test-faults=1 /proc/cmdline && export Q2_EMULATOR_TEST=1
+        fi
+        Q2ND_APP="$APP" Q2ND_RUNTIME="$RUN" Q2ND_PLATFORM="$platform" \
+            Q2ND_DATA=/state/Q2Navidrome /usr/libexec/q2-launcher >> "$RUN/launcher.log" 2>&1 &
+        ;;
+    stop)
+        # An intentional service stop is not a worker hang. Disarm before
+        # waiting for audio/UI teardown; restart creates a fresh owner.
+        /etc/init.d/S79q2-supervisor stop || exit 1
+        # The launcher signals its child during cleanup but can exit before
+        # the child finishes saving state. Stop must wait for both processes.
+        player=$(cat "$RUN/player.pid" 2>/dev/null || :)
+        if [ -f "$RUN/launcher.pid" ]; then
+            pid=$(cat "$RUN/launcher.pid")
+            kill -TERM "$pid" 2>/dev/null || :
+            n=0
+            while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 15 ]; do
+                sleep 1
+                n=$((n + 1))
+            done
+            ! kill -0 "$pid" 2>/dev/null || exit 1
+        fi
+        if [ -n "$player" ]; then
+            n=0
+            while kill -0 "$player" 2>/dev/null && [ "$n" -lt 15 ]; do
+                sleep 1
+                n=$((n + 1))
+            done
+            ! kill -0 "$player" 2>/dev/null || exit 1
+        fi
+        ;;
+    restart) "$0" stop && "$0" start ;;
+    *) echo "usage: $0 start|stop|restart" >&2; exit 2 ;;
+esac

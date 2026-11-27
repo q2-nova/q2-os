@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+# Disposable emulator USB link. No default route and no real network secrets.
+grep -qw q2.diagnostic=1 /proc/cmdline && exit 0
+case "$1" in
+start)
+    mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config || exit 1
+    g=/sys/kernel/config/usb_gadget/q2net
+    [ ! -d "$g" ] || exit 0
+    mkdir "$g" || exit 1
+    echo 0x1d6b > "$g/idVendor"
+    echo 0x0104 > "$g/idProduct"
+    mkdir -p "$g/strings/0x409" "$g/configs/c.1" "$g/functions/rndis.usb0"
+    echo q2-emulator > "$g/strings/0x409/serialnumber"
+    echo 'Q2 emulator USB' > "$g/strings/0x409/product"
+    ln -s "$g/functions/rndis.usb0" "$g/configs/c.1/"
+    ls /sys/class/udc > "$g/UDC"
+    ip link set usb0 up
+    ip address add 10.0.2.15/24 dev usb0
+    ;;
+esac

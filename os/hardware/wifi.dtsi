@@ -1,0 +1,42 @@
+/* Same MSC1 and enable wiring as kernel patch 34; host loads only on request. */
+#include <dt-bindings/gpio/gpio.h>
+/ {
+	aliases { mmc1 = &msc1; };
+	wlan_bt_en: regulator-wlan-bt {
+		compatible = "regulator-fixed";
+		regulator-name = "wlan-bt-en";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&gpd 20 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <10000>;
+	};
+	wlan_en: regulator-wlan {
+		compatible = "regulator-fixed";
+		regulator-name = "wlan-en";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&gpd 1 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		vin-supply = <&wlan_bt_en>;
+		off-on-delay-us = <100000>;
+	};
+};
+&pinctrl {
+	msc1_pins: mmc1-pins {
+		function = "mmc1";
+		groups = "mmc1-1bit", "mmc1-4bit";
+	};
+};
+&msc1 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&msc1_pins>;
+	vmmc-supply = <&wlan_en>;
+	bus-width = <4>;
+	non-removable;
+	keep-power-in-suspend;
+	cap-sd-highspeed;
+	no-1-8-v;
+	max-frequency = <50000000>;
+};

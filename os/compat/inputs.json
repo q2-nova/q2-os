@@ -1,0 +1,56 @@
+{
+  "profiles": {
+    "os-kernel": {
+      "origin_commit": "47f65aa6c9507cf3f4533d498df2eb1f90a30270",
+      "series_sha256": "f4643decdc6148f00c3bdc519e578028983deea9caaf774af5def0c6054481d1",
+      "origin_tree": "3e2062354ce371ccde2ef4d86630f0f532565241"
+    },
+    "diagnostic": {
+      "origin_commit": "d89c735f7b90547c4196475c7b0343a5271e87d6",
+      "series_sha256": "ff62dbd3370395d1747b9d18144df53d961737343f14b7262bca873c04d7d095"
+    },
+    "diagnostic-wifi": {
+      "origin_commit": "cbe264d10905e6db5f941b527b5a15b007198d24",
+      "series_sha256": "affa126a963bf4ddcd3ff8977ee5347b128eed9b6ecd6af73860072e60142e05"
+    },
+    "qemu": {
+      "origin_commit": "47f65aa6c9507cf3f4533d498df2eb1f90a30270"
+    }
+  },
+  "kernel_patches": {
+    "kernel/patches/0001-MIPS-permit-XBurst-CPUs-in-MIPS32r5-builds.patch": "f425bae552785e233f9766422a3b4a2b2cf38dc96177a55cf732ebbeb4fce56d",
+    "kernel/patches/0002-clk-ingenic-port-the-X2000-CGU-driver.patch": "337a9dfbdbadb11ce90f01845b7d1f896756aa4823abfdc538020610862ec100",
+    "kernel/patches/0003-irqchip-and-clocksource-add-X2000-per-core-interrupt.patch": "92b988342f2615eedd16070bc71fcd15a386afaa9b68c9faf79d0a361eecae93",
+    "kernel/patches/0004-MIPS-ingenic-add-X2000-CCU-SMP-bring-up.patch": "631e6cf1ddd2d9bb3a8818291302250cf5121bc5171a9d01d681e2068b235b5d",
+    "kernel/patches/0005-MIPS-dts-add-X2000-and-Shanling-Q2-boot-configuratio.patch": "306988c58a7477bb5170f735a55f174063237037048b568e0dfa1b252a5ab562",
+    "kernel/patches/0006-mmc-add-X2000-SDHCI-glue-for-the-Shanling-Q2.patch": "ba0e974deba1ede58fc91de0e7fc8fa08aa724570dc61a040507f9e077614fe0",
+    "kernel/patches/0007-MIPS-dts-wire-Q2-I2C-buses-fuel-gauge-buttons-and-mi.patch": "f89c18b9938c39933053b0426629390ef39e58495a381f39eb1afd1780437e8e",
+    "kernel/patches/0008-spi-add-X2000-SFC-command-table-PIO-support.patch": "d4e1a1796b4ef0781d6a92ad76b5336a9c45fa603660653a416fed18aa528eca",
+    "kernel/patches/0009-mtd-spinand-add-vendor-derived-Dosilicon-DS35Q2GA-ge.patch": "c8ce6ddc4f7bab6ca5bfdafe1b34fb40eb250d402cfe1d04f94e5cbffaadb29f",
+    "kernel/patches/0010-MIPS-dts-enable-Q2-SPI-NAND-and-filesystem-boot-supp.patch": "63eecb2c57c503bfe926417f614a477e6fd25ea660c49126e4b71bf4b18d53b0",
+    "kernel/patches/0011-mfd-axp20x-import-AXP2101-regulator-and-power-supply.patch": "dbf4a74cd5fda5537531d88adde395fc4976ee4360f0a3920ec0af2b72517113",
+    "kernel/patches/0012-power-support-the-Q2-AXP2101-without-a-PMIC-interrup.patch": "0881f31f66f424099a49a4255888a684bc4893902c7066f92b3047a4caf7fa83",
+    "kernel/patches/0013-pwm-add-X2000-standalone-PWM-and-Q2-backlight.patch": "88c2f31b8568c97db8cdd5283bf42d72099ee82443b040da8ee80e4d4e3bd961",
+    "kernel/patches/0014-MIPS-q2-stabilize-kernel-release-and-initramfs-times.patch": "188404665cab0ee16d8ebe0edb2b5017b4e8128fa9f34c135a71c1396d97511c",
+    "kernel/patches/0015-pinctrl-ingenic-serialize-shared-shadow-register-tra.patch": "7410e6125b8f53e4d7e6eea5e4d6c5ad944062593135d20da361a4f3b4109b2e",
+    "kernel/patches/0016-drm-add-X2000-direct-composer-DSI-and-Shanling-Q2-pa.patch": "b0b20f0fb2c8fa10da7f62b1456739e7eba20ed6b518799c65b079cf6dda7612",
+    "kernel/patches/0017-clk-ingenic-fix-X2000-I2S-fractions-and-expose-audio.patch": "2c8c4688f823a614ce1b6b5a681f4a4f531c58e35465e5628a17bb1eab872542",
+    "kernel/patches/0018-ASoC-cs43130-support-shared-reset-and-multi-codec-PC.patch": "4c93f4f54f640f316f5742d09dd952483e601a71a5ff32a02324dd6026cf0121",
+    "kernel/patches/0019-ASoC-add-X2000-BAIC1-playback-and-Shanling-Q2-sound-.patch": "7eeb1a77b6125596ed48a14198bd1327e7bd9be1d10a767d5d41ca62a0e96416",
+    "kernel/patches/0020-watchdog-add-X2000-RTC-watchdog-and-preserve-inherit.patch": "0d96d08c4bacab4377320605e0e8f86d43fcc86e53285c0901c4c2d7270c8502",
+    "kernel/patches/0021-MIPS-ingenic-enable-X2000-hotplug-and-restore-per-co.patch": "3a6d5ef0b5bb49cbebb4240f75412ba21bc6139e14d12d1aed42427042722abb",
+    "kernel/patches/0022-Input-add-Shanling-Q2-CST816T-wheel-application-driv.patch": "c55a661e674e38c8e6327f69fd46f5f21a70c8671ef3abc25159e28429304faa",
+    "kernel/patches/0023-rtc-add-X2000-time-and-alarms-without-legacy-wake-ti.patch": "f4792f673deab383103e205f790b2320d6ed5749f3b27fc82d9776cb5d0c99cd",
+    "kernel/patches/0024-ASoC-quiesce-Q2-playback-and-outputs-during-forced-s.patch": "1f8bde4568e7fa869ef463b9869f6eec48e65748259901903d228baea4a2f80f",
+    "kernel/patches/0025-ASoC-account-for-X2000-FIFO-occupancy-when-reporting.patch": "30d6c0d643d5242975284fb7efc5a7aeb93127b6276db62299564a52cc00509f",
+    "kernel/patches/0026-MIPS-enable-X2000-SMP-kexec-with-secondary-reset-and.patch": "cf0a8975520ad1dbfe680ff5dac550790e1fe1dd26f991994571ce2eebbb8991",
+    "kernel/patches/0027-phy-ingenic-add-X2000-USB-PHY-and-Q2-peripheral-wiri.patch": "1076e0668c303e2b3cdd3cc3dc80216108e68d583eae3d572054a105efce1359",
+    "kernel/patches/0028-usb-dwc2-rearm-ep0-after-a-disconnected-session-rese.patch": "aebb37a73096f413f90515b7eb72dfa9c2eeb7d8a95de0bc6f8d37c635a4072e",
+    "kernel/patches/0029-driver-core-release-old-glue-directory-after-device_.patch": "c188fd6c9e295b9f218101575c08017d0431c6f2cceb6642f1d8e24aa228e30f",
+    "kernel/patches/0030-MIPS-Q2-consume-chosen-bootargs-for-FDT-kexec-entry.patch": "f687c1a0a5930f224c5d54f8ecd402528f01517450601feae63be8749a776a5e",
+    "kernel/patches/0031-mtd-spinand-dosilicon-specify-DS35Q2GA-bad-block-bud.patch": "6fc8607a95cfb334060342fcb6ac23c8c3050388def751a1ba8ec219a1533bce",
+    "kernel/patches/0032-ASoC-x2000-sample-DMA-and-FIFO-position-coherently.patch": "4d721c6d38faa3f497d1bc0cac6828f7246e83e1a4b7bf741ff911506bae4e3a",
+    "kernel/patches/0033-MIPS-recognize-XBurst2-whole-MMU-invalidation.patch": "09823f6cf0a55f2cc1adf8e836a089073b13820de50bd2ea61e83c3849081d5c",
+    "kernel/patches/0034-MIPS-dts-wire-the-Q2-RTL8733BS-SDIO-slot-and-enable-.patch": "1867baf40f8e858c66ada792da8f077190aff1a6996463f34a3309754c0dd5ed"
+  }
+}

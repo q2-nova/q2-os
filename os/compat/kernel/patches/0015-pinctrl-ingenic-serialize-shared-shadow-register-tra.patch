@@ -1,0 +1,120 @@
+From c67666151c6e959e44cb9d7ff048f939e0a52d74 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 12:36:31 -0500
+Subject: [PATCH] pinctrl: ingenic: serialize shared shadow register
+ transactions
+
+Port Z is shared across GPIO banks. The pinctrl mutex serializes direction and mux operations, but IRQ type changes bypass it and can corrupt an in-flight shadow transaction on SMP. Protect writes through GID2LD with one IRQ-safe lock, as the vendor driver does, and use raw regmap locking in this atomic path.
+---
+ drivers/pinctrl/pinctrl-ingenic.c | 23 +++++++++++++++++------
+ 1 file changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/pinctrl/pinctrl-ingenic.c b/drivers/pinctrl/pinctrl-ingenic.c
+index 1aa6a6dc1..a4fbe5808 100644
+--- a/drivers/pinctrl/pinctrl-ingenic.c
++++ b/drivers/pinctrl/pinctrl-ingenic.c
+@@ -18,6 +18,7 @@
+ #include <linux/regmap.h>
+ #include <linux/seq_file.h>
+ #include <linux/slab.h>
++#include <linux/spinlock.h>
+ 
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/pinctrl/pinconf-generic.h>
+@@ -133,6 +134,8 @@ struct ingenic_chip_info {
+ };
+ 
+ struct ingenic_pinctrl {
++	/* Port Z is shared by all banks and IRQ/direction/mux operations. */
++	raw_spinlock_t shadow_lock;
+ 	struct device *dev;
+ 	struct regmap *map;
+ 	struct pinctrl_dev *pctl;
+@@ -3592,6 +3595,7 @@ static void irq_set_type(struct ingenic_gpio_chip *jzgc,
+ {
+ 	u8 reg1, reg2;
+ 	bool val1, val2, val3;
++	unsigned long flags;
+ 
+ 	switch (type) {
+ 	case IRQ_TYPE_EDGE_BOTH:
+@@ -3629,15 +3633,14 @@ static void irq_set_type(struct ingenic_gpio_chip *jzgc,
+ 		return;
+ 	}
+ 
+-	if (is_soc_or_above(jzgc->jzpc, ID_X2000)) {
+-		ingenic_gpio_shadow_set_bit(jzgc, reg2, offset, val1);
+-		ingenic_gpio_shadow_set_bit(jzgc, reg1, offset, val2);
+-		ingenic_gpio_shadow_set_bit_load(jzgc);
+-		ingenic_gpio_set_bit(jzgc, X2000_GPIO_EDG, offset, val3);
+-	} else if (is_soc_or_above(jzgc->jzpc, ID_X1000)) {
++	if (is_soc_or_above(jzgc->jzpc, ID_X1000)) {
++		raw_spin_lock_irqsave(&jzgc->jzpc->shadow_lock, flags);
+ 		ingenic_gpio_shadow_set_bit(jzgc, reg2, offset, val1);
+ 		ingenic_gpio_shadow_set_bit(jzgc, reg1, offset, val2);
+ 		ingenic_gpio_shadow_set_bit_load(jzgc);
++		if (is_soc_or_above(jzgc->jzpc, ID_X2000))
++			ingenic_gpio_set_bit(jzgc, X2000_GPIO_EDG, offset, val3);
++		raw_spin_unlock_irqrestore(&jzgc->jzpc->shadow_lock, flags);
+ 	} else {
+ 		ingenic_gpio_set_bit(jzgc, reg2, offset, val1);
+ 		ingenic_gpio_set_bit(jzgc, reg1, offset, val2);
+@@ -3966,6 +3969,7 @@ static const struct irq_chip ingenic_gpio_irqchip = {
+ static int ingenic_pinmux_set_pin_fn(struct ingenic_pinctrl *jzpc,
+ 		int pin, int func)
+ {
++	unsigned long flags;
+ 	unsigned int idx = pin % PINS_PER_GPIO_CHIP;
+ 	unsigned int offt = pin / PINS_PER_GPIO_CHIP;
+ 
+@@ -3973,11 +3977,13 @@ static int ingenic_pinmux_set_pin_fn(struct ingenic_pinctrl *jzpc,
+ 			'A' + offt, idx, func);
+ 
+ 	if (is_soc_or_above(jzpc, ID_X1000)) {
++		raw_spin_lock_irqsave(&jzpc->shadow_lock, flags);
+ 		ingenic_shadow_config_pin(jzpc, pin, JZ4770_GPIO_INT, false);
+ 		ingenic_shadow_config_pin(jzpc, pin, GPIO_MSK, false);
+ 		ingenic_shadow_config_pin(jzpc, pin, JZ4770_GPIO_PAT1, func & 0x2);
+ 		ingenic_shadow_config_pin(jzpc, pin, JZ4770_GPIO_PAT0, func & 0x1);
+ 		ingenic_shadow_config_pin_load(jzpc, pin);
++		raw_spin_unlock_irqrestore(&jzpc->shadow_lock, flags);
+ 	} else if (is_soc_or_above(jzpc, ID_JZ4770)) {
+ 		ingenic_config_pin(jzpc, pin, JZ4770_GPIO_INT, false);
+ 		ingenic_config_pin(jzpc, pin, GPIO_MSK, false);
+@@ -4035,6 +4041,7 @@ static int ingenic_pinmux_gpio_set_direction(struct pinctrl_dev *pctldev,
+ 		unsigned int pin, bool input)
+ {
+ 	struct ingenic_pinctrl *jzpc = pinctrl_dev_get_drvdata(pctldev);
++	unsigned long flags;
+ 	unsigned int idx = pin % PINS_PER_GPIO_CHIP;
+ 	unsigned int offt = pin / PINS_PER_GPIO_CHIP;
+ 
+@@ -4042,10 +4049,12 @@ static int ingenic_pinmux_gpio_set_direction(struct pinctrl_dev *pctldev,
+ 			'A' + offt, idx, input ? "in" : "out");
+ 
+ 	if (is_soc_or_above(jzpc, ID_X1000)) {
++		raw_spin_lock_irqsave(&jzpc->shadow_lock, flags);
+ 		ingenic_shadow_config_pin(jzpc, pin, JZ4770_GPIO_INT, false);
+ 		ingenic_shadow_config_pin(jzpc, pin, GPIO_MSK, true);
+ 		ingenic_shadow_config_pin(jzpc, pin, JZ4770_GPIO_PAT1, input);
+ 		ingenic_shadow_config_pin_load(jzpc, pin);
++		raw_spin_unlock_irqrestore(&jzpc->shadow_lock, flags);
+ 	} else if (is_soc_or_above(jzpc, ID_JZ4770)) {
+ 		ingenic_config_pin(jzpc, pin, JZ4770_GPIO_INT, false);
+ 		ingenic_config_pin(jzpc, pin, GPIO_MSK, true);
+@@ -4389,6 +4398,7 @@ static const struct regmap_config ingenic_pinctrl_regmap_config = {
+ 	.reg_bits = 32,
+ 	.val_bits = 32,
+ 	.reg_stride = 4,
++	.use_raw_spinlock = true,
+ };
+ 
+ static const struct of_device_id ingenic_gpio_of_matches[] __initconst = {
+@@ -4504,6 +4514,7 @@ static int __init ingenic_pinctrl_probe(struct platform_device *pdev)
+ 	jzpc = devm_kzalloc(dev, sizeof(*jzpc), GFP_KERNEL);
+ 	if (!jzpc)
+ 		return -ENOMEM;
++	raw_spin_lock_init(&jzpc->shadow_lock);
+ 
+ 	base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(base))

@@ -1,0 +1,5 @@
+config BR2_PACKAGE_Q2_PROBES
+	bool "Q2 ABI and runtime probes"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_ALSA_LIB
+	select BR2_PACKAGE_Q2_PLATFORM

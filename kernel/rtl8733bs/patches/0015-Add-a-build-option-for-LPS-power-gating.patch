@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Q2 source preparation <noreply@localhost>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] Add a build option for LPS power gating
+
+`make CONFIG_LPS_PG=y` defines CONFIG_LPS_PG, which compiles the LPS
+power-gating paths: the LPS_PG_INFO reserved page and H2C, the 8733B
+RPWM power-gating request bit (BIT4 of HRPWM1) and the rate-adaptation
+hold while gated. The default LPS level stays clock gating
+(rtw_lps_level 1); rtw_lps_level=2 at load selects power gating.
+
+With the option, the 8733B would crash on the first LPS leave: the
+leave path's LPS_PG_REDLEMEM step calls hal_func.fw_mem_dl, which the
+8733B HAL never sets. Both 8733B firmware images have no EMEM section
+(header byte 24 is 0x08, bit 4 clear; EMEM size 0), so the reload
+HALMAC would do is empty; the step is skipped for the 8733B, as it
+already is for the 8822C and 8822E.
+
+The ordinary build (CONFIG_LPS_PG = n) compiles the same code as before:
+both changes are inside CONFIG_LPS_PG.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Makefile      | 12 ++++++++++++
+ hal/hal_com.c |  9 +++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/Makefile b/Makefile
+--- a/Makefile
++++ b/Makefile
+@@ -76,6 +76,9 @@
+ CONFIG_POWER_SAVING = y
+ CONFIG_IPS_MODE = default
+ CONFIG_LPS_MODE = default
++# LPS power gating, selected at load with rtw_lps_level=2. Off in the
++# ordinary build; `make CONFIG_LPS_PG=y` builds the power-gating paths.
++CONFIG_LPS_PG = n
+ CONFIG_USB_AUTOSUSPEND = n
+ CONFIG_HW_PWRP_DETECTION = n
+ CONFIG_BT_COEXIST = y
+@@ -1168,6 +1171,15 @@
+ EXTRA_CFLAGS += -DRTW_WOW_LPS_MODE=$(CONFIG_WOW_LPS_MODE)
+ endif
+ EXTRA_CFLAGS += -DCONFIG_POWER_SAVING
++ifeq ($(CONFIG_LPS_PG), y)
++EXTRA_CFLAGS += -DCONFIG_LPS_PG
++# CONFIG_LPS_PG alone raises the default LPS mode to 3 (power gating).
++# Keep the default level at clock gating (rtw_lps_level 1), as without
++# the option, so power gating needs rtw_lps_level=2 at load.
++ifeq ($(CONFIG_LPS_MODE), default)
++EXTRA_CFLAGS += -DRTW_LPS_MODE=2
++endif
++endif
+ endif
+
+ ifeq ($(CONFIG_HW_PWRP_DETECTION), y)
+diff --git a/hal/hal_com.c b/hal/hal_com.c
+--- a/hal/hal_com.c
++++ b/hal/hal_com.c
+@@ -12632,6 +12632,15 @@
+ 		if (IS_8822E_SERIES(GET_HAL_DATA(adapter)->version_id))
+ 			break;
+
++		/* The 8733B HAL sets no fw_mem_dl operation, so the call below
++		 * would jump to NULL. Its firmware images have no EMEM section
++		 * (header byte 24 bit 4 clear, EMEM size 0), and HALMAC's
++		 * free_download_firmware_87xx returns at once for such an image:
++		 * there is nothing to reload.
++		 */
++		if (IS_8733B_SERIES(GET_HAL_DATA(adapter)->version_id))
++			break;
++
+ 		/*set xmit_block*/
+ 		rtw_set_xmit_block(adapter, XMIT_BLOCK_REDLMEM);
+ 		if (_FAIL == rtw_hal_fw_mem_dl(adapter, FW_EMEM))
+--
+2.47.0
+

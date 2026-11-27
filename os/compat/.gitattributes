@@ -1,0 +1,4 @@
+# Preserve the Linux and QEMU input bytes recorded in inputs.json.
+kernel/** -text
+qemu/** -text
+*.patch -whitespace

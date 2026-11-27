@@ -1,0 +1,98 @@
+From ae68a52ee61c1e839941fcf7e44170e17bf6d69e Mon Sep 17 00:00:00 2001
+From: Q2 source preparation <noreply@localhost>
+Date: Sat, 7 Nov 2026 16:40:22 -0600
+Subject: [PATCH] Expose nonblocking cached power-management state
+
+---
+ core/rtw_debug.c | 68 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 68 insertions(+)
+
+diff --git a/core/rtw_debug.c b/core/rtw_debug.c
+index 0f89592..1c42291 100755
+--- a/core/rtw_debug.c
++++ b/core/rtw_debug.c
+@@ -6138,6 +6138,73 @@ ssize_t proc_set_new_bcn_max(struct file *file, const char __user *buffer, size_
+ }
+ #endif
+ #ifdef CONFIG_POWER_SAVING
++/* Cached software state only. In particular, CPWM here is the driver's
++ * shadow, not a new hardware read. Do not call PS_RDY_CHECK from a reader:
++ * some of its predicates have side effects. Other subsystems can change
++ * after their individual reads; this is not an atomic whole-device snapshot.
++ */
++static void rtw_dump_cached_ps_state(struct seq_file *m, _adapter *adapter)
++{
++	struct pwrctrl_priv *pwr = adapter_to_pwrctl(adapter);
++	struct dvobj_priv *dvobj = adapter_to_dvobj(adapter);
++	struct {
++		u32 mode, firmware_ps, rpwm, cpwm, rpwm_toggle, cpwm_toggle;
++		u32 leisure, idle_count, in_suspend, ips_processing, ps_processing;
++		u32 power_saving, deny, lps_deny_active;
++		u32 fw_ready, hw_ready, cmd_running, watchdog_timer;
++		u32 busy_traffic, low_power_count, mi_linked, mi_linking;
++		u32 group_key, scan_deny, cfg_pm;
++	} s;
++
++	/* Never block behind a firmware transaction or hold this lock while
++	 * formatting output. rtw_ps_deny_get requires its caller to own it.
++	 */
++	if (down_trylock(&pwr->lock)) {
++		RTW_PRINT_SEL(m, " Cached PS: version=1 busy=1\n");
++		return;
++	}
++	s.mode = READ_ONCE(pwr->pwr_mode);
++	s.firmware_ps = !!READ_ONCE(pwr->bFwCurrentInPSMode);
++	s.rpwm = READ_ONCE(pwr->rpwm);
++	s.cpwm = READ_ONCE(pwr->cpwm);
++	s.rpwm_toggle = READ_ONCE(pwr->tog);
++	s.cpwm_toggle = READ_ONCE(pwr->cpwm_tog);
++	s.leisure = !!READ_ONCE(pwr->bLeisurePs);
++	s.idle_count = READ_ONCE(pwr->LpsIdleCount);
++	s.in_suspend = !!READ_ONCE(pwr->bInSuspend);
++	s.ips_processing = !!READ_ONCE(pwr->bips_processing);
++	s.ps_processing = !!READ_ONCE(pwr->ps_processing);
++	s.power_saving = !!READ_ONCE(pwr->bpower_saving);
++	s.deny = rtw_ps_deny_get(adapter);
++	s.lps_deny_active = !!rtw_time_after(READ_ONCE(pwr->lps_deny_time), rtw_get_current_time());
++	_exit_pwrlock(&pwr->lock);
++
++	s.fw_ready = !!READ_ONCE(GET_HAL_DATA(adapter)->bFWReady);
++	s.hw_ready = !!READ_ONCE(GET_HAL_DATA(adapter)->hw_init_completed);
++	s.cmd_running = !!ATOMIC_READ(&adapter->cmdpriv.cmdthd_running);
++	s.watchdog_timer = !!_check_timer_is_active(&dvobj->dynamic_chk_timer);
++	s.busy_traffic = !!READ_ONCE(adapter->mlmepriv.LinkDetectInfo.bBusyTraffic);
++	s.low_power_count = READ_ONCE(adapter->mlmepriv.LinkDetectInfo.LowPowerTransitionCount);
++	s.mi_linked = READ_ONCE(dvobj->iface_state.ld_sta_num);
++	s.mi_linking = READ_ONCE(dvobj->iface_state.lg_sta_num);
++	/* Presence only; never include any key bytes or other private state. */
++	s.group_key = !!READ_ONCE(adapter->securitypriv.binstallGrpkey);
++	s.scan_deny = 2; /* feature not compiled */
++#ifdef CONFIG_SET_SCAN_DENY_TIMER
++	s.scan_deny = !!ATOMIC_READ(&adapter->mlmepriv.set_scan_deny);
++#endif
++	s.cfg_pm = 2; /* feature not compiled */
++#ifdef CONFIG_IOCTL_CFG80211
++	s.cfg_pm = !!rtw_cfg80211_pwr_mgmt(adapter);
++#endif
++	RTW_PRINT_SEL(m, " Cached PS: version=1 busy=0 mode=%u firmware_ps=%u rpwm=%u cpwm=%u rpwm_toggle=%u cpwm_toggle=%u leisure=%u idle_count=%u in_suspend=%u ips_processing=%u ps_processing=%u power_saving=%u deny=0x%08x lps_deny_active=%u fw_ready=%u hw_ready=%u cmd_running=%u watchdog_timer=%u busy_traffic=%u low_power_count=%u mi_linked=%u mi_linking=%u group_key=%u scan_deny=%u cfg_pm=%u\n",
++		s.mode, s.firmware_ps, s.rpwm, s.cpwm, s.rpwm_toggle, s.cpwm_toggle,
++		s.leisure, s.idle_count, s.in_suspend, s.ips_processing, s.ps_processing,
++		s.power_saving, s.deny, s.lps_deny_active, s.fw_ready, s.hw_ready,
++		s.cmd_running, s.watchdog_timer, s.busy_traffic, s.low_power_count,
++		s.mi_linked, s.mi_linking, s.group_key, s.scan_deny, s.cfg_pm);
++}
++
+ int proc_get_ps_info(struct seq_file *m, void *v)
+ {
+ 	struct net_device *dev = m->private;
+@@ -6264,6 +6331,7 @@ int proc_get_ps_info(struct seq_file *m, void *v)
+ #endif /* CONFIG_WOWLAN */
+ 
+ 	RTW_PRINT_SEL(m, "=============================\n");
++	rtw_dump_cached_ps_state(m, padapter);
+ 	return 0;
+ }
+ 
+-- 
+2.55.0
+

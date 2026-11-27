@@ -1,0 +1,42 @@
+#!/bin/sh
+# RAM-only application qualification. No NAND device or owner configuration.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mount -t devtmpfs none /dev
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t tmpfs -o mode=0755,nosuid,nodev none /run
+mount -t tmpfs -o mode=1777 none /tmp
+mkdir -p /dev/pts /run/log /run/q2 /run/q2nd /mnt/mmc /state
+mount -t devpts none /dev/pts
+exec </dev/ttyS3 >/dev/ttyS3 2>&1
+hostname q2-player-hardware
+umask 077
+if /sbin/q2-diagnostic-usb; then
+    /usr/sbin/dropbear -F -E -s -r /etc/q2-hardware/hostkey -p 192.168.77.2:22 > /run/log/ssh 2>&1 &
+fi
+# Apply the board's stock battery voltage before peripheral qualification.
+# A charged Q2 exceeds the PMIC's 4.2 V reset setting; DT supplies 4.35 V.
+for driver in i2c-gpio axp20x-i2c axp20x_usb_power axp20x_battery; do
+    modprobe "$driver" || echo "Power setup failed: $driver"
+done
+# This path is a newly generated fixture, not the owner's player state.
+n=0
+while [ ! -b /dev/mmcblk0p1 ] && [ "$n" -lt 15 ]; do sleep 1; n=$((n+1)); done
+if mount -t exfat -o nosuid,nodev,noexec /dev/mmcblk0p1 /mnt/mmc &&
+   mount -t ext4 -o loop,nosuid,nodev /mnt/mmc/.q2-mainline-dev-20261102/state.ext4 /state; then
+    mkdir -p /state/Q2Navidrome /state/app
+    [ -e /state/Q2Navidrome/config.toml ] || cp /etc/q2-defaults/hardware-fixture.toml /state/Q2Navidrome/config.toml
+    echo ready > /run/q2/state-status
+else
+    echo missing > /run/q2/state-status
+fi
+/etc/init.d/S02q2-clock start
+/etc/init.d/S25q2-clock-trust start
+# Start the player explicitly over SSH after inspecting the physical drivers.
+echo Q2_PLAYER_HARDWARE_READY
+dmesg > /run/log/boot
+# UART0 is an explicit emulator fixture channel, not a USB console.
+if grep -qw q2.emulated=1 /proc/cmdline; then
+    while :; do setsid sh -c 'exec sh </dev/ttyS0 >/dev/ttyS0 2>&1'; sleep 1; done
+fi
+while :; do sleep 60; done

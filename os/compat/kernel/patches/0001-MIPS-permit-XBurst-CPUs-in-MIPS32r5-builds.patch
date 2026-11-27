@@ -1,0 +1,30 @@
+From ae886fa600ea55a182b5bdbebbb6db96babe38ab Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:29:14 -0500
+Subject: [PATCH 1/5] MIPS: permit XBurst CPUs in MIPS32r5 builds
+
+XBurst2 probes as CPU_XBURST. With only SYS_HAS_CPU_MIPS32_R5 selected,
+__get_cpu_type() previously treated it as unreachable. In the Q2 emulator
+this produced an invalid prefetch bias and an early BUG in build_clear_page.
+Include CPU_XBURST in the r5 whitelist.
+---
+ arch/mips/include/asm/cpu-type.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/arch/mips/include/asm/cpu-type.h b/arch/mips/include/asm/cpu-type.h
+index fd37a44a2..bcd0707ad 100644
+--- a/arch/mips/include/asm/cpu-type.h
++++ b/arch/mips/include/asm/cpu-type.h
+@@ -37,6 +37,12 @@ static inline int __pure __get_cpu_type(const int cpu_type)
+ #if defined(CONFIG_SYS_HAS_CPU_MIPS32_R1) || \
+     defined(CONFIG_SYS_HAS_CPU_MIPS32_R2)
+ 	case CPU_4KEC:
++#endif
++
++/* XBurst2 is identified as CPU_XBURST, but implements MIPS32r5. */
++#if defined(CONFIG_SYS_HAS_CPU_MIPS32_R1) || \
++    defined(CONFIG_SYS_HAS_CPU_MIPS32_R2) || \
++    defined(CONFIG_SYS_HAS_CPU_MIPS32_R5)
+ 	case CPU_XBURST:
+ #endif
+ 

@@ -1,0 +1,328 @@
+From ee6b481abed2cc3f912ce9682aaafea4b8b60084 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 11:37:01 -0500
+Subject: [PATCH 12/12] power: support the Q2 AXP2101 without a PMIC interrupt
+
+Keep regulator ranges and fixed RTC rails consistent with the stock Q2 binary. Wire its GPIO I2C bus and preserve charger configuration in the absence of a verified battery profile. Poll USB presence when no interrupt is described, and supply that state to CW2015. Use the AXP2101 charge-current selector rather than the legacy AXP20X register during probe.
+---
+ .../bindings/mfd/x-powers,axp152.yaml         |  2 +-
+ .../x-powers,axp20x-usb-power-supply.yaml     |  9 +++
+ arch/mips/boot/dts/ingenic/shanling-q2.dts    | 65 +++++++++++++++++++
+ arch/mips/configs/shanling_q2_defconfig       |  7 ++
+ drivers/mfd/axp20x.c                          | 13 +++-
+ drivers/power/supply/axp20x_battery.c         | 17 ++++-
+ drivers/power/supply/axp20x_usb_power.c       | 16 ++++-
+ drivers/regulator/axp20x-regulator.c          |  4 +-
+ include/linux/mfd/axp20x.h                    |  2 +
+ 9 files changed, 127 insertions(+), 8 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml b/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml
+index f5e2c8232..abacc46ce 100644
+--- a/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml
++++ b/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml
+@@ -68,11 +68,11 @@ allOf:
+           compatible:
+             contains:
+               enum:
+-                - x-powers,axp2101
+                 - x-powers,axp15060
+                 - x-powers,axp305
+                 - x-powers,axp313a
+                 - x-powers,axp323
++                - x-powers,axp2101
+ 
+     then:
+       required:
+diff --git a/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml b/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml
+index 1c582aa5e..831989833 100644
+--- a/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml
++++ b/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml
+@@ -42,6 +42,15 @@ required:
+   - compatible
+ 
+ allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: x-powers,axp2101-usb-power-supply
++    then:
++      properties:
++        input-current-limit-microamp: false
++
+   - $ref: power-supply.yaml#
+   - if:
+       properties:
+diff --git a/arch/mips/boot/dts/ingenic/shanling-q2.dts b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+index f3367107b..08940c8c6 100644
+--- a/arch/mips/boot/dts/ingenic/shanling-q2.dts
++++ b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+@@ -21,6 +21,7 @@ aliases {
+ 		i2c2 = &i2c2;
+ 		i2c3 = &i2c3;
+ 		i2c5 = &i2c5;
++		i2c6 = &pmic_i2c;
+ 		mmc0 = &msc2;
+ 		serial3 = &uart3;
+ 	};
+@@ -34,6 +35,69 @@ memory@0 {
+ 		reg = <0x0 0x8000000>;
+ 	};
+ 
++	pmic_i2c: i2c-pmic {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc 24 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpc 23 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		pmic: pmic@34 {
++			compatible = "x-powers,axp2101";
++			reg = <0x34>;
++			axp_usb: usb-power-supply {
++				compatible = "x-powers,axp2101-usb-power-supply";
++			};
++			battery-power-supply {
++				compatible = "x-powers,axp2101-battery-power-supply";
++				power-supplies = <&axp_usb>;
++			};
++			regulators {
++				/* Constraints from the stock Q2 DT, not the R1 board. */
++				dcdc1 {
++					regulator-name = "axp2101-dcdc1";
++					regulator-min-microvolt = <1500000>;
++					regulator-max-microvolt = <3400000>;
++					regulator-always-on;
++				};
++				dcdc2 {
++					regulator-name = "axp2101-dcdc2";
++					regulator-min-microvolt = <1200000>;
++					regulator-max-microvolt = <1200000>;
++					regulator-always-on;
++				};
++				dcdc3 {
++					regulator-name = "axp2101-dcdc3";
++					regulator-min-microvolt = <500000>;
++					regulator-max-microvolt = <3400000>;
++					regulator-always-on;
++				};
++				dcdc4 {
++					regulator-name = "axp2101-dcdc4";
++					regulator-min-microvolt = <950000>;
++					regulator-max-microvolt = <950000>;
++					regulator-always-on;
++				};
++				rtcldo {
++					regulator-name = "axp2101-rtcldo";
++					regulator-always-on;
++				};
++				bldo1 {
++					regulator-name = "axp2101-bldo1";
++					regulator-min-microvolt = <1800000>;
++					regulator-max-microvolt = <1800000>;
++					regulator-always-on;
++				};
++				bldo2 {
++					regulator-name = "axp2101-bldo2";
++					regulator-min-microvolt = <3300000>;
++					regulator-max-microvolt = <3300000>;
++					regulator-always-on;
++				};
++			};
++		};
++	};
++
+ 	keys {
+ 		compatible = "gpio-keys";
+ 		label = "Q2 buttons";
+@@ -121,6 +185,7 @@ &i2c0 {
+ 	clock-frequency = <200000>;
+ 	battery-gauge@62 {
+ 		compatible = "cellwise,cw2015";
++		power-supplies = <&axp_usb>;
+ 		reg = <0x62>;
+ 	};
+ };
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index 80ead7448..4605f41d2 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -63,3 +63,10 @@ CONFIG_MTD_CMDLINE_PARTS=y
+ CONFIG_MTD_SPI_NAND=y
+ CONFIG_SQUASHFS=y
+ CONFIG_SQUASHFS_XZ=y
++CONFIG_I2C_GPIO=y
++CONFIG_MFD_AXP20X_I2C=y
++CONFIG_REGULATOR_AXP20X=y
++CONFIG_AXP20X_POWER=y
++CONFIG_BATTERY_AXP20X=y
++CONFIG_IIO=y
++CONFIG_AXP20X_ADC=y
+diff --git a/drivers/mfd/axp20x.c b/drivers/mfd/axp20x.c
+index b87d7ef5b..4eaddb63a 100644
+--- a/drivers/mfd/axp20x.c
++++ b/drivers/mfd/axp20x.c
+@@ -1143,7 +1143,7 @@ static const struct resource axp2101_usb_power_supply_resources[] = {
+ };
+ 
+ /* No driver handles its fuel gauge yet. */
+-static struct mfd_cell axp2101_cells[] = {
++static const struct mfd_cell axp2101_cells[] = {
+ 	MFD_CELL_NAME("axp20x-regulator"),
+ 	MFD_CELL_OF("axp20x-usb-power-supply",
+ 		    axp2101_usb_power_supply_resources, NULL, 0, 0,
+@@ -1152,6 +1152,15 @@ static struct mfd_cell axp2101_cells[] = {
+ 		    NULL, NULL, 0, 0, "x-powers,axp2101-battery-power-supply"),
+ };
+ 
++/* Q2 has no PMIC IRQ in its stock DT; supplies can operate by polling. */
++static const struct mfd_cell axp2101_cells_no_irq[] = {
++	MFD_CELL_NAME("axp20x-regulator"),
++	MFD_CELL_OF("axp20x-usb-power-supply", NULL, NULL, 0, 0,
++		    "x-powers,axp2101-usb-power-supply"),
++	MFD_CELL_OF("axp20x-battery-power-supply", NULL, NULL, 0, 0,
++		    "x-powers,axp2101-battery-power-supply"),
++};
++
+ static struct mfd_cell axp717_cells[] = {
+ 	MFD_CELL_NAME("axp20x-regulator"),
+ 	MFD_CELL_RES("axp20x-pek", axp717_pek_resources),
+@@ -1427,6 +1436,8 @@ int axp20x_match_device(struct axp20x_dev *axp20x)
+ 		axp20x->cells = axp2101_cells;
+ 		axp20x->regmap_cfg = &axp2101_regmap_config;
+ 		axp20x->regmap_irq_chip = &axp2101_regmap_irq_chip;
++		cells_no_irq = axp2101_cells_no_irq;
++		nr_cells_no_irq = ARRAY_SIZE(axp2101_cells_no_irq);
+ 		break;
+ 	case AXP803_ID:
+ 		axp20x->nr_cells = ARRAY_SIZE(axp803_cells);
+diff --git a/drivers/power/supply/axp20x_battery.c b/drivers/power/supply/axp20x_battery.c
+index a653ad923..b058ad932 100644
+--- a/drivers/power/supply/axp20x_battery.c
++++ b/drivers/power/supply/axp20x_battery.c
+@@ -540,8 +540,10 @@ static int axp2101_battery_get_prop(struct power_supply *psy,
+ 		if (ret)
+ 			return ret;
+ 
+-		val->intval = axp2101_ccc_from_sel(FIELD_GET(AXP2101_ICC_MASK,
+-							     reg));
++		reg = FIELD_GET(AXP2101_ICC_MASK, reg);
++		if (reg > AXP2101_ICC_MAX_SEL)
++			return -EINVAL;
++		val->intval = axp2101_ccc_from_sel(reg);
+ 		return 0;
+ 
+ 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
+@@ -1354,6 +1356,17 @@ static int axp20x_power_probe(struct platform_device *pdev)
+ 		power_supply_put_battery_info(axp20x_batt->batt, info);
+ 	}
+ 
++	if (axp20x_batt->data == &axp2101_data) {
++		union power_supply_propval val;
++
++		ret = axp2101_battery_get_prop(axp20x_batt->batt,
++			POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX, &val);
++		if (ret)
++			return ret;
++		axp20x_batt->max_ccc = val.intval;
++		return 0;
++	}
++
+ 	/*
+ 	 * Update max CCC to a valid value if battery info is present or set it
+ 	 * to current register value by default.
+diff --git a/drivers/power/supply/axp20x_usb_power.c b/drivers/power/supply/axp20x_usb_power.c
+index 594f0492b..23b939a56 100644
+--- a/drivers/power/supply/axp20x_usb_power.c
++++ b/drivers/power/supply/axp20x_usb_power.c
+@@ -182,13 +182,17 @@ static void axp2101_usb_power_poll_vbus(struct work_struct *work)
+ 
+ 	ret = regmap_read(power->regmap, AXP2101_PMU_STATUS_1, &val);
+ 	if (ret)
+-		return;
++		goto out;
+ 
+ 	val &= AXP2101_PWR_STATUS_VBUS_GOOD;
+ 	if (val != power->old_status)
+ 		power_supply_changed(power->supply);
+ 
+ 	power->old_status = val;
++out:
++	if (!power->num_irqs)
++		mod_delayed_work(system_power_efficient_wq, &power->vbus_detect,
++				 msecs_to_jiffies(2000));
+ }
+ 
+ static int axp20x_get_usb_type(struct axp20x_usb_power *power,
+@@ -1029,12 +1033,18 @@ static int axp20x_usb_power_probe(struct platform_device *pdev)
+ 	power->axp_data = axp_data;
+ 	power->regmap = axp20x->regmap;
+ 	power->num_irqs = axp_data->num_irq_names;
++	if (axp20x->variant == AXP2101_ID && !axp20x->regmap_irqc)
++		power->num_irqs = 0;
+ 
+ 	power->curr_lim_fld = devm_regmap_field_alloc(&pdev->dev, power->regmap,
+ 						      axp_data->curr_lim_fld);
+ 	if (IS_ERR(power->curr_lim_fld))
+ 		return PTR_ERR(power->curr_lim_fld);
+ 
++	if (axp20x->variant == AXP2101_ID &&
++	    device_property_present(&pdev->dev, "input-current-limit-microamp"))
++		return dev_err_probe(&pdev->dev, -EOPNOTSUPP,
++				     "AXP2101 input current limit writes unsupported\n");
+ 	axp20x_usb_power_parse_dt(&pdev->dev, power);
+ 
+ 	ret = axp20x_regmap_field_alloc_optional(&pdev->dev, power->regmap,
+@@ -1104,7 +1114,7 @@ static int axp20x_usb_power_probe(struct platform_device *pdev)
+ 		return PTR_ERR(power->supply);
+ 
+ 	/* Request irqs after registering, as irqs may trigger immediately */
+-	for (i = 0; i < axp_data->num_irq_names; i++) {
++	for (i = 0; i < power->num_irqs; i++) {
+ 		irq = platform_get_irq_byname(pdev, axp_data->irq_names[i]);
+ 		if (irq < 0)
+ 			return irq;
+@@ -1117,7 +1127,7 @@ static int axp20x_usb_power_probe(struct platform_device *pdev)
+ 			return ret;
+ 	}
+ 
+-	if (axp20x_usb_vbus_needs_polling(power))
++	if (!power->num_irqs || axp20x_usb_vbus_needs_polling(power))
+ 		queue_delayed_work(system_power_efficient_wq, &power->vbus_detect, 0);
+ 
+ 	return 0;
+diff --git a/drivers/regulator/axp20x-regulator.c b/drivers/regulator/axp20x-regulator.c
+index 00ccadf5c..4d41540e6 100644
+--- a/drivers/regulator/axp20x-regulator.c
++++ b/drivers/regulator/axp20x-regulator.c
+@@ -792,6 +792,8 @@ static const struct linear_range axp2101_dcdc5_ranges[] = {
+ #define AXP2101_LDO_V_OUT_MASK		GENMASK(4, 0)
+ 
+ static const struct regulator_desc axp2101_regulators[] = {
++	AXP_DESC_FIXED(AXP2101, RTC_LDO, "rtcldo", "ips", 1800),
++	AXP_DESC_FIXED(AXP2101, RTC_LDO1, "rtcldo1", "ips", 1800),
+ 	AXP_DESC(AXP2101, DCDC1, "dcdc1", "vin1", 1500, 3400, 100,
+ 		 AXP2101_DCDC1_CONTROL, AXP2101_DCDC15_V_OUT_MASK,
+ 		 AXP2101_DCDC_OUTPUT_CONTROL, BIT(0)),
+@@ -829,7 +831,7 @@ static const struct regulator_desc axp2101_regulators[] = {
+ 	AXP_DESC(AXP2101, BLDO2, "bldo2", "bldoin", 500, 3500, 100,
+ 		 AXP2101_BLDO2_CONTROL, AXP2101_LDO_V_OUT_MASK,
+ 		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(5)),
+-	AXP_DESC(AXP2101, DLDO1, "dldo1", "dldoin", 500, 3400, 100,
++	AXP_DESC(AXP2101, DLDO1, "dldo1", "dldoin", 500, 3500, 100,
+ 		 AXP2101_DLDO1_CONTROL, AXP2101_LDO_V_OUT_MASK,
+ 		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(7)),
+ 	AXP_DESC(AXP2101, DLDO2, "dldo2", "dldoin", 500, 1400, 50,
+diff --git a/include/linux/mfd/axp20x.h b/include/linux/mfd/axp20x.h
+index 21db12a41..9aefa595b 100644
+--- a/include/linux/mfd/axp20x.h
++++ b/include/linux/mfd/axp20x.h
+@@ -582,6 +582,8 @@ enum {
+ 	AXP2101_DLDO1,
+ 	AXP2101_DLDO2,
+ 	AXP2101_CPUSLDO,
++	AXP2101_RTC_LDO,
++	AXP2101_RTC_LDO1,
+ 	AXP2101_REG_ID_MAX,
+ };
+ 

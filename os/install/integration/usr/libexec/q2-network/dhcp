@@ -1,0 +1,125 @@
+#!/bin/sh
+# udhcpc owns only wlan0. Read-only root uses /run/resolv.conf.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RESOLV=/run/resolv.conf
+RUN=/run/q2-network
+PROC=/proc
+BOOT_TIMES=/run/q2-network/boot-times
+UPTIME=/proc/uptime
+bootmark() {
+    [ ! -L "$BOOT_TIMES" ] && { [ ! -e "$BOOT_TIMES" ] || { [ -f "$BOOT_TIMES" ] && [ "$(wc -c < "$BOOT_TIMES")" -lt 65408 ]; }; } || return 0
+    read -r uptime idle < "$UPTIME" || return 0
+    case "$uptime" in *.*) ;; *) return 0 ;; esac
+    case "${uptime%.*}:${uptime#*.}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+    printf '%s %s\n' "$uptime" "$1" >> "$BOOT_TIMES" 2>/dev/null || :
+}
+ipv4() {
+    printf '%s\n' "$1" | awk -F. 'NF!=4 { exit 1 } { for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i>255) exit 1 }'
+}
+clear_portal_lease() {
+    [ -e "$RUN/portal-lease" ] || [ -L "$RUN/portal-lease" ] || return 0
+    rm -f "$RUN/portal-lease" 2>/dev/null || :
+}
+wifi_status() {
+    timeout -k 1 1 /usr/sbin/wpa_cli -i wlan0 status
+}
+capture_portal_identity() {
+    # BusyBox exports option 114 (0x72) as hexadecimal opt114.
+    case "${opt114:-}" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+    [ "${#opt114}" -le 510 ] && [ "$((${#opt114} % 2))" -eq 0 ] || return 1
+    [ -d "$RUN" ] && [ ! -d "$RUN/portal-lease" ] || return 1
+    # A BSSID mismatch (including a roam) uses legacy discovery until DHCP
+    # publishes a fresh option for the current association.
+    portal_status=$(wifi_status) || return 1
+    printf '%s\n' "$portal_status" | awk '
+        /^wpa_state=/ { states++; state=substr($0,11) }
+        /^ssid=/ { ssids++; ssid=substr($0,6) }
+        /^bssid=/ { bssids++; bssid=substr($0,7) }
+        END {
+            if (states != 1 || ssids != 1 || bssids != 1 || state != "COMPLETED" ||
+                ssid == "" || length(ssid) > 128 || ssid ~ /[[:cntrl:]]/ ||
+                length(bssid) != 17 || split(bssid, parts, ":") != 6) exit 1
+            for (i=1; i<=6; i++) if (parts[i] !~ /^[0-9a-fA-F][0-9a-fA-F]$/) exit 1
+            printf "%s\n%s\n", bssid, ssid
+        }
+    '
+}
+publish_portal_lease() {
+    # The resolver is replaced on every configured lease, including when the
+    # optional record cannot be deleted or created.
+    # The shipped BusyBox has ls -i but installs no stat command.
+    portal_listing=$(ls -di "$RESOLV") || return 0
+    portal_generation=$(printf '%s\n' "$portal_listing" | awk 'NR == 1 { print $1 }') || return 0
+    case "$portal_generation" in ''|*[!0-9]*) return 0 ;; esac
+    portal_tmp=$(mktemp "$RUN/portal-lease.XXXXXX") || return 0
+    if ! { printf 'q2-capport-v2\n%s\n%s\n%s\n%s\n' \
+        "$ip" "$portal_generation" "$portal_identity" "$opt114" > "$portal_tmp" \
+        && mv -f "$portal_tmp" "$RUN/portal-lease"; }; then
+        rm -f "$portal_tmp" 2>/dev/null || :
+    fi
+}
+configure_resolver() {
+    umask 077
+    : > "$RESOLV.new" || return 1
+    for server in ${dns:-}; do
+        ipv4 "$server" || continue
+        printf 'nameserver %s\n' "$server" >> "$RESOLV.new" || return 1
+    done
+    mv "$RESOLV.new" "$RESOLV"
+}
+main() {
+[ "${interface:-}" = wlan0 ] || exit 1
+case "${1:-}" in
+    deconfig)
+        clear_portal_lease
+        ip -4 addr flush dev wlan0
+        ;;
+    bound|renew)
+        ipv4 "${ip:-}" && ipv4 "${subnet:-}" || exit 1
+        clear_portal_lease
+        portal_identity=
+        resolver_ready=false
+        if [ -n "${opt114:-}" ]; then
+            portal_identity=$(capture_portal_identity 2>/dev/null) || portal_identity=
+        fi
+        # The first address observation can launch portal detection immediately.
+        # Publish both inputs before exposing that address when possible.
+        if [ -n "$portal_identity" ] && configure_resolver 2>/dev/null; then
+            resolver_ready=true
+            publish_portal_lease 2>/dev/null
+        fi
+        ifconfig wlan0 "$ip" netmask "$subnet"
+        bootmark wlan-address-configured
+        for gateway in ${router:-}; do
+            ipv4 "$gateway" || continue
+            ip route replace default via "$gateway" dev wlan0
+            bootmark wlan-default-route-configured
+            break
+        done
+        # Ordinary leases keep the address/route/DNS order. If early DNS
+        # failed, retry here without interrupting address or route setup.
+        if [ "$resolver_ready" = false ]; then
+            configure_resolver
+            if [ -n "$portal_identity" ]; then publish_portal_lease 2>/dev/null; fi
+        fi
+        # Dedicated numeric RAM telemetry: address/DNS configuration completed,
+        # not proof of Internet or server reachability. No network identifiers.
+        if [ -d "$RUN" ] && [ ! -L "$RUN/connect-times" ] && { [ ! -e "$RUN/connect-times" ] || { [ -f "$RUN/connect-times" ] && [ "$(wc -c < "$RUN/connect-times")" -lt 65408 ]; }; }; then
+            read -r uptime idle < "$PROC/uptime" || uptime=
+            case "$uptime" in ''|*[!0-9.]*) ;; *)
+                printf '%s wifi-ipv4-ready\n' "$uptime" >> "$RUN/connect-times" || : ;;
+            esac
+        fi
+        # Optional next-release NTP uses its own explicit time provenance;
+        # DHCP itself never changes the clock or enables the HTTPS gate.
+        if [ -x /usr/libexec/q2-network/time ]; then
+            /usr/libexec/q2-network/time online || :
+        fi
+        ;;
+    *) exit 0 ;;
+esac
+
+}
+if [ "${Q2_DHCP_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

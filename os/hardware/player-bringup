@@ -1,0 +1,159 @@
+#!/bin/sh
+# Explicit peripheral qualification for the RAM-only player image.
+# No network setup, player launch, owner configuration or PMIC register writes.
+set -eu
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+case "${1:-}" in
+    '') scope=all ;;
+    --audio-only) scope=audio ;;
+    *) echo "Usage: q2-player-bringup [--audio-only]" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || exit 2
+grep -qw q2.hardware=1 /proc/cmdline || {
+    echo 'This helper requires the RAM hardware qualification image.' >&2
+    exit 1
+}
+mkdir -p /run/log /run/q2
+log=/run/log/player-bringup
+audio_pid=
+finish() {
+    status=$?
+    trap - EXIT
+    # A failed display probe or termination must still join the accepted audio
+    # chain before init can inspect failure or begin recovery. Never orphan a
+    # codec load, and capture the complete log only after both chains retire.
+    trap '' HUP INT TERM
+    if [ -n "$audio_pid" ]; then
+        if wait "$audio_pid"; then :; else
+            [ "$status" -ne 0 ] || status=1
+        fi
+    fi
+    dmesg > /run/log/player-bringup-dmesg || :
+    exit "$status"
+}
+trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+bootmark() {
+    read -r uptime idle < /proc/uptime || return 0
+    echo "$uptime $1" >> /run/q2/boot-times || :
+}
+
+fail() { echo "$*" | tee -a "$log" >&2; exit 1; }
+load() {
+    bootmark "module-$1-begin"
+    echo "Loading $1"
+    echo "Loading $1" >> "$log"
+    modprobe "$1" >> "$log" 2>&1 || fail "Module failed: $1 (see $log)"
+    # EXIT captures one complete snapshot on success and every failure. Avoid
+    # repeatedly copying the same boot log between ordered module loads.
+    bootmark "module-$1-complete"
+}
+clicker_module() {
+    # Unqualified DMA is opt-in through the explicit candidate DT. Shipping the
+    # optional module/config must not replace the active legacy beeper.
+    if [ -f "$1" ] && tr '\000' '\n' < "$1" | grep -qx 'ingenic,x2000-pwm-audio'; then
+        echo snd-x2000-pwm-audio
+    else
+        echo pwm-beeper
+    fi
+}
+audio_ready() {
+    [ -L /sys/bus/platform/drivers/shanling-q2-audio/sound ] || return 1
+    for address in 30 31 32 33; do
+        [ -L "/sys/bus/i2c/drivers/cs43130/5-00$address" ] || return 1
+    done
+    grep -q 'Shanling Q2' /proc/asound/cards
+}
+
+audio_bringup() {
+    load shanling-q2
+    [ -L /sys/bus/platform/drivers/shanling-q2-audio/sound ] ||
+        fail 'Machine probe did not bind; codec power-up was not attempted.'
+    # Preserve the machine's PB10/PB9/PB2 setup and 200 ms settle before the
+    # codec asserts shared PB14 and enables PB1. Display uses separate rails.
+    load x2000-audio
+    load snd-soc-cs43130
+    audio_ready || fail 'Not all four codecs and the sound card bound; inspect the saved dmesg.'
+    : > /run/q2/audio-ready
+}
+
+need_audio=1
+if [ -e /run/q2/audio-ready ]; then
+    audio_ready || fail 'Audio no longer matches its ready marker; inspect the devices before retrying.'
+    need_audio=0
+else
+    # A module can load successfully while all device probes are deferred.
+    # Refuse to hide an earlier codec-first or partially completed attempt.
+    [ ! -d /sys/module/snd_soc_cs43130 ] ||
+        fail 'Codec module already loaded without the audio-ready marker; use a fresh RAM boot.'
+    # Shared power and I2C dependencies precede both independent chains.
+    for driver in i2c-gpio axp20x-i2c axp20x_usb_power axp20x_battery axp20x-regulator i2c-jz4780; do
+        load "$driver"
+    done
+    [ -d /sys/class/power_supply/axp20x-battery ] ||
+        fail 'PMIC battery driver did not bind; codec power-up was not attempted.'
+fi
+
+if [ "$need_audio" = 1 ]; then
+    if [ "$scope" = all ]; then
+        (trap - EXIT HUP INT TERM; audio_bringup) &
+        audio_pid=$!
+    else
+        audio_bringup
+    fi
+fi
+
+if [ "$scope" = all ]; then
+    clicker_driver=$(clicker_module /sys/firmware/devicetree/base/clicker/compatible)
+    # Only panel dependencies precede the splash. Wheel, gauge, RTC and clicker
+    # are still required for player admission, but do not supply the display.
+    for driver in pwm-ingenic-x2000 pwm_bl panel-shanling-q2 ingenic-x2000-dsi ingenic-x2000-dpu; do
+        load "$driver"
+    done
+    [ -c /dev/dri/card0 ] || fail 'Display DRM device is absent.'
+    # Draw before the audio join/state/network/player startup. Failure is
+    # nonfatal: preserve normal display admission and record no success marker.
+    # No second display owner persists; fbdev yields to the normal KMS player.
+    if [ ! -e /run/q2/init-splash-complete ] && [ -x /sbin/q2-init-splash ]; then
+        bootmark init-splash-begin
+        if /sbin/q2-init-splash; then
+            : > /run/q2/init-splash-complete
+            bootmark init-splash-complete
+        else
+            bootmark init-splash-failed
+        fi
+    fi
+    for driver in shanling-q2-wheel cw2015_battery rtc-jz4740 "$clicker_driver"; do
+        load "$driver"
+    done
+    [ -d /sys/class/backlight/backlight ] || fail 'Display backlight device is absent.'
+    [ -d /sys/class/power_supply/cw2015-battery ] || fail 'Battery gauge device is absent.'
+    [ -d /sys/class/rtc/rtc0 ] || fail 'RTC device is absent.'
+    wheel_ready=false
+    clicker_ready=false
+    for name in /sys/class/input/input*/name; do
+        [ -f "$name" ] || continue
+        IFS= read -r input_name < "$name" || continue
+        case "$input_name" in
+            hyn_sliderbar) wheel_ready=true ;;
+            pwm-beeper) clicker_ready=true ;;
+        esac
+        if "$wheel_ready" && "$clicker_ready"; then break; fi
+    done
+    "$wheel_ready" || fail 'Wheel input device is absent.'
+    "$clicker_ready" || fail 'Clicker input device is absent.'
+    if [ "$clicker_driver" = snd-x2000-pwm-audio ]; then
+        grep -q 'Clicker' /proc/asound/cards || fail 'Clicker PCM card is absent.'
+    fi
+    if [ -n "$audio_pid" ]; then
+        audio_status=0
+        wait "$audio_pid" || audio_status=$?
+        audio_pid=
+        [ "$audio_status" = 0 ] || fail 'Audio bring-up failed; player admission withheld.'
+    fi
+    : > /run/q2/peripherals-ready
+fi
+echo "Q2 $scope drivers ready; physical output and input remain to be checked." | tee -a "$log"

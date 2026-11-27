@@ -1,0 +1,194 @@
+From fafb65fe36bc8a7aa6b6bf6385e0687b79f60a68 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 13:38:41 -0500
+Subject: [PATCH 17/19] clk: ingenic: fix X2000 I2S fractions and expose audio
+ clocks
+
+Replace a fraction search that used an uninitialized denominator and
+32-bit-overflowing arithmetic with rational_best_approximation. Expose
+the audio bus and BAIC1 gates and its real SCLKA/EPLL parent mux without
+renumbering existing clock IDs. Allow an internal parent to register after
+its child so the appended mux ID preserves the existing binding ABI.
+
+Q2 mainline playback tests verify exact 22.5792/24.576 MHz clocks and
+44.1/48/96 kHz BAIC output in the emulator. Physical clocks and the EPLL
+parent path in this kernel remain unqualified.
+---
+ drivers/clk/ingenic/Kconfig                   |  1 +
+ drivers/clk/ingenic/cgu.c                     |  9 +-
+ drivers/clk/ingenic/x2000-cgu.c               | 84 ++++++-------------
+ include/dt-bindings/clock/ingenic,x2000-cgu.h |  4 +
+ 4 files changed, 35 insertions(+), 63 deletions(-)
+
+diff --git a/drivers/clk/ingenic/Kconfig b/drivers/clk/ingenic/Kconfig
+index 902763901..ada781148 100644
+--- a/drivers/clk/ingenic/Kconfig
++++ b/drivers/clk/ingenic/Kconfig
+@@ -89,6 +89,7 @@ config INGENIC_CGU_X2000
+ 	bool "Ingenic X2000 CGU driver"
+ 	default MACH_X2000
+ 	select INGENIC_CGU_COMMON
++	select RATIONAL
+ 	help
+ 	  Support the clocks provided by the CGU hardware on Ingenic X2000
+ 	  and compatible SoCs.
+diff --git a/drivers/clk/ingenic/cgu.c b/drivers/clk/ingenic/cgu.c
+index 41e4c6913..a0c9d5b04 100644
+--- a/drivers/clk/ingenic/cgu.c
++++ b/drivers/clk/ingenic/cgu.c
+@@ -712,8 +712,9 @@ static int ingenic_register_clock(struct ingenic_cgu *cgu, unsigned idx)
+ 				continue;
+ 
+ 			parent = cgu->clocks.clks[clk_info->parents[i]];
+-			parent_names[clk_init.num_parents] =
+-				__clk_get_name(parent);
++			parent_names[clk_init.num_parents] = parent ?
++				__clk_get_name(parent) :
++				cgu->clock_info[clk_info->parents[i]].name;
+ 			clk_init.num_parents++;
+ 		}
+ 
+@@ -723,7 +724,9 @@ static int ingenic_register_clock(struct ingenic_cgu *cgu, unsigned idx)
+ 		BUG_ON(clk_info->parents[0] == -1);
+ 		clk_init.num_parents = 1;
+ 		parent = cgu->clocks.clks[clk_info->parents[0]];
+-		parent_names[0] = __clk_get_name(parent);
++		/* Newly appended clock IDs may parent an older ABI clock ID. */
++		parent_names[0] = parent ? __clk_get_name(parent) :
++			cgu->clock_info[clk_info->parents[0]].name;
+ 	}
+ 
+ 	if (caps & CGU_CLK_CUSTOM) {
+diff --git a/drivers/clk/ingenic/x2000-cgu.c b/drivers/clk/ingenic/x2000-cgu.c
+index c26179031..271e85a41 100644
+--- a/drivers/clk/ingenic/x2000-cgu.c
++++ b/drivers/clk/ingenic/x2000-cgu.c
+@@ -4,6 +4,7 @@
+  * Copyright (C) 2020 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
+  */
+ 
++#include <linux/rational.h>
+ #include <linux/bitfield.h>
+ #include <linux/clk-provider.h>
+ #include <linux/delay.h>
+@@ -132,69 +133,16 @@ static void x2000_i2s_calc_m_n(const struct ingenic_cgu_pll_info *pll_info,
+ 		       unsigned long rate, unsigned long parent_rate,
+ 		       unsigned int *pm, unsigned int *pn, unsigned int *pod)
+ {
+-	unsigned int m, n, rem;
+-	u64 curr_m, curr_n, curr_rem;
++	unsigned long m, n;
+ 
+-	if ((parent_rate % rate == 0) && ((parent_rate / rate) > 1)) {
+-		m = 1;
+-		n = parent_rate / rate;
+-		goto out;
+-	}
+-
+-	rem = 0xffffffff;
+-
+-	/*
+-	 * The length of M is 9 bits, its maximum value is 511.
+-	 * The length of N is 20 bits, its maximum value is 1048575.
++	/* Keep all arithmetic valid on the 32-bit X2000. The previous search
++	 * used an uninitialized denominator and overflowed rate * 1048575.
++	 * Hardware requires N >= 2*M, with 9-bit M and 20-bit N.
+ 	 */
+-	curr_m = min_t(u64, rate * 1048575 / parent_rate + 1, 511);
+-
+-	/* The value of M must be no less than 1 */
+-	for (; curr_m >= 1; curr_m--) {
+-		curr_n = parent_rate * curr_m;
+-		curr_rem = do_div(curr_n, rate);
+-
+-		/*
+-		 * When the remainer value is greater than the half
+-		 * of the divisor value, use the quotient value + 1
+-		 * as the N value to obtain the smallest deviation.
+-		 */
+-		if (curr_rem * 2 > rate) {
+-			curr_rem = rate - curr_rem;
+-			curr_n += 1;
+-		}
+-
+-		/*
+-		 * The value of N must be no less than 2 times of the
+-		 * value of M, and no greater than 1048575.
+-		 */
+-		if (curr_n >= 2 * curr_m && curr_n <= 1048575) {
+-
+-			/*
+-			 * To determine whether a better set of parameters
+-			 * has been found by comparing the quotient values
+-			 * of curr_rem ÷ curr_n and rem ÷ n.
+-			 */
+-			if (curr_rem * n < rem * curr_n) {
+-				m = curr_m;
+-				n = curr_n;
+-
+-				if (curr_rem)
+-					rem = curr_rem;
+-				else
+-					break;
+-			}
+-		}
+-	}
+-
+-out:
++	rate = clamp(rate, DIV_ROUND_UP(parent_rate, 1048575), parent_rate / 2);
++	rational_best_approximation(rate, parent_rate, 511, 1048575, &m, &n);
+ 	*pm = m;
+ 	*pn = n;
+-
+-	/*
+-	 * The I2S PLL does not have any OD bits, so set the *pod to 1 to
+-	 * ensure that the ingenic_pll_calc() in cgu.c can run properly.
+-	 */
+ 	*pod = 1;
+ }
+ 
+@@ -383,7 +331,7 @@ static const struct ingenic_cgu_clk_info x2000_cgu_clocks[] = {
+ 
+ 	[X2000_CLK_I2S1] = {
+ 		"i2s1", CGU_CLK_PLL,
+-		.parents = { X2000_CLK_SCLKA, X2000_CLK_EPLL, -1, -1 },
++		.parents = { X2000_CLK_I2S1_MUX },
+ 		.pll = {
+ 			.reg = CGU_REG_I2S1CDR,
+ 			.rate_multiplier = 1,
+@@ -854,6 +802,22 @@ static const struct ingenic_cgu_clk_info x2000_cgu_clocks[] = {
+ 		.gate = { CGU_REG_CLKGR1, 28 },
+ 	},
+ 
++	[X2000_CLK_AUDIO] = {
++		"audio", CGU_CLK_GATE,
++		.parents = { X2000_CLK_AHB0 },
++		.gate = { CGU_REG_CLKGR0, 11 },
++	},
++	[X2000_CLK_I2S1_GATE] = {
++		"i2s1_gate", CGU_CLK_GATE,
++		.parents = { X2000_CLK_I2S1 },
++		.gate = { CGU_REG_CLKGR1, 9 },
++	},
++	[X2000_CLK_I2S1_MUX] = {
++		"i2s1_mux", CGU_CLK_MUX,
++		.parents = { X2000_CLK_SCLKA, X2000_CLK_EPLL },
++		.mux = { CGU_REG_I2S1CDR, 30, 1 },
++	},
++
+ 	[X2000_CLK_DSI] = {
+ 		"dsi", CGU_CLK_GATE,
+ 		.parents = { X2000_CLK_AHB0 },
+diff --git a/include/dt-bindings/clock/ingenic,x2000-cgu.h b/include/dt-bindings/clock/ingenic,x2000-cgu.h
+index 1c53ca7ef..6d660f669 100644
+--- a/include/dt-bindings/clock/ingenic,x2000-cgu.h
++++ b/include/dt-bindings/clock/ingenic,x2000-cgu.h
+@@ -86,4 +86,8 @@
+ #define X2000_CLK_CSI			71
+ #define X2000_CLK_DSI			72
+ 
++#define X2000_CLK_AUDIO			73
++#define X2000_CLK_I2S1_GATE		74
++#define X2000_CLK_I2S1_MUX		75
++
+ #endif /* __DT_BINDINGS_CLOCK_X2000_CGU_H__ */

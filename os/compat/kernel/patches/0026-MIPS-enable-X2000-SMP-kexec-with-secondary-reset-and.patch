@@ -1,0 +1,248 @@
+From 4e1211a89a1375ba4d7e0aef34b369e5e94f22b4 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 17:23:18 -0500
+Subject: [PATCH] MIPS: enable X2000 SMP kexec with secondary reset and cache
+ handoff
+
+Offline CPU1 through hotplug, hold it in CCU reset, and pass the replacement FDT using the standard MIPS firmware arguments. Reject crash and context-preserving handoffs. Flush the source and copied image with the X2000 SDK cache sequence and execute relocation uncached. Keep the watchdog armed across device shutdown. Physical cache/coherency qualification remains outstanding.
+---
+ arch/mips/configs/shanling_q2_defconfig |  3 ++
+ arch/mips/generic/smp-ingenic-x2000.c   | 72 +++++++++++++++++++++++++
+ arch/mips/kernel/machine_kexec.c        | 33 +++++++++++-
+ arch/mips/kernel/relocate_kernel.S      | 33 ++++++++++++
+ 4 files changed, 140 insertions(+), 1 deletion(-)
+
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index 7024bea16..b7747de86 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -99,3 +99,6 @@ CONFIG_INPUT_MISC=y
+ CONFIG_INPUT_SHANLING_Q2_WHEEL=y
+ CONFIG_RTC_CLASS=y
+ CONFIG_RTC_DRV_JZ4740=y
++
++CONFIG_KEXEC=y
++# CONFIG_CRASH_DUMP is not set
+diff --git a/arch/mips/generic/smp-ingenic-x2000.c b/arch/mips/generic/smp-ingenic-x2000.c
+index 2c16f04e0..f0c2b0a47 100644
+--- a/arch/mips/generic/smp-ingenic-x2000.c
++++ b/arch/mips/generic/smp-ingenic-x2000.c
+@@ -19,6 +19,10 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/irq.h>
++#include <linux/kexec.h>
++#include <linux/libfdt.h>
++#include <linux/reboot.h>
++#include <linux/uaccess.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/sched/hotplug.h>
+@@ -28,6 +32,7 @@
+ 
+ #include <asm/cpu-info.h>
+ #include <asm/mipsregs.h>
++#include <asm/kexec.h>
+ #include <asm/smp-ops.h>
+ #include <asm/tlbflush.h>
+ 
+@@ -211,6 +216,65 @@ void __noreturn play_dead(void)
+ }
+ #endif
+ 
++#ifdef CONFIG_KEXEC_CORE
++static int x2000_kexec_prepare(struct kimage *image)
++{
++	unsigned int i;
++
++	/* Normal handoff only. Crash entry and context-preserving jumps need
++	 * their own secondary/cache protocols, not the normal hotplug path.
++	 */
++	if (image->type != KEXEC_TYPE_DEFAULT || image->preserve_context ||
++	    !IS_ENABLED(CONFIG_HOTPLUG_CPU) || reboot_cpu != 0)
++		return -EOPNOTSUPP;
++
++	for (i = 0; i < image->nr_segments; i++) {
++		struct fdt_header header __aligned(8);
++		struct kexec_segment *seg = &image->segment[i];
++
++		if (seg->bufsz < sizeof(header) ||
++		    copy_from_user(&header, seg->buf, sizeof(header)) ||
++		    fdt_check_header(&header))
++			continue;
++		if (fdt_totalsize(&header) > seg->bufsz ||
++		    fdt_totalsize(&header) > seg->memsz)
++			return -EINVAL;
++		kexec_args[0] = -2;
++		kexec_args[1] = CKSEG0ADDR(seg->mem);
++		kexec_args[2] = kexec_args[3] = 0;
++		return 0;
++	}
++	return -EINVAL;
++}
++
++static void x2000_kexec_shutdown(void)
++{
++	/* Hotplug flushes the secondary, waits for WAIT, then holds it in CCU
++	 * reset. It must not run old kernel text while relocation overwrites it.
++	 */
++	if (smp_processor_id() != 0)
++		panic("X2000 kexec must run on CPU0");
++	smp_shutdown_nonboot_cpus(0);
++	if (num_online_cpus() != 1)
++		panic("X2000 kexec could not offline secondary");
++	writel(0, ccu + CCU_MBR(1));
++	ccu_update(CCU_PIMR, BIT(1), 0);
++	ccu_update(CCU_MIMR, BIT(1), 0);
++	ccu_update(CCU_OIMR, BIT(1), 0);
++	ccu_update(CCU_CSRR, 0, BIT(1));
++}
++
++static void __noreturn x2000_kexec_nonboot_cpu(void)
++{
++	/* Defensive secondary path; normal shutdown has already offlined it. */
++	local_irq_disable();
++	__flush_cache_all();
++	ccu_update(CCU_CSRR, 0, BIT(smp_processor_id()));
++	for (;;)
++		__asm__ __volatile__("wait");
++}
++#endif
++
+ static const struct plat_smp_ops x2000_smp_ops = {
+ 	.send_ipi_single	= x2000_send_ipi_single,
+ 	.send_ipi_mask		= x2000_send_ipi_mask,
+@@ -219,6 +283,9 @@ static const struct plat_smp_ops x2000_smp_ops = {
+ 	.boot_secondary		= x2000_boot_secondary,
+ 	.init_secondary		= x2000_init_secondary,
+ 	.smp_finish		= x2000_smp_finish,
++#ifdef CONFIG_KEXEC_CORE
++	.kexec_nonboot_cpu	= x2000_kexec_nonboot_cpu,
++#endif
+ #ifdef CONFIG_HOTPLUG_CPU
+ 	.cpu_disable		= x2000_cpu_disable,
+ 	.cpu_die		= x2000_cpu_die,
+@@ -240,6 +307,11 @@ int __init register_ingenic_x2000_smp_ops(void)
+ 	if (!ccu)
+ 		return -ENOMEM;
+ 
++#ifdef CONFIG_KEXEC_CORE
++	reboot_cpu = 0;
++	_machine_kexec_prepare = x2000_kexec_prepare;
++	_machine_kexec_shutdown = x2000_kexec_shutdown;
++#endif
+ 	register_smp_ops(&x2000_smp_ops);
+ 
+ 	return 0;
+diff --git a/arch/mips/kernel/machine_kexec.c b/arch/mips/kernel/machine_kexec.c
+index 4e3579bbd..247b6e485 100644
+--- a/arch/mips/kernel/machine_kexec.c
++++ b/arch/mips/kernel/machine_kexec.c
+@@ -12,6 +12,8 @@
+ 
+ #include <asm/cacheflush.h>
+ #include <asm/page.h>
++#include <asm/cacheops.h>
++#include <asm/r4kcache.h>
+ 
+ extern const unsigned char relocate_new_kernel[];
+ extern const size_t relocate_new_kernel_size;
+@@ -168,6 +170,30 @@ void kexec_nonboot_cpu_jump(void)
+ }
+ #endif
+ 
++static bool x2000_kexec(void)
++{
++	return IS_ENABLED(CONFIG_INGENIC_X2000_SMP) &&
++		(read_c0_prid() & 0xffffff00) == 0x00132000;
++}
++
++/* X2000 SDK soc/cache.h: 32 KiB L1D/L1I, 512 KiB L2, 32/64-byte
++ * lines, with uncached read barriers around the secondary-cache flush.
++ * The relocated assembly repeats this after copying the new image.
++ */
++static void x2000_kexec_flush(void)
++{
++	unsigned long addr;
++
++	for (addr = CKSEG0; addr < CKSEG0 + 32768; addr += 32)
++		cache_op(Index_Writeback_Inv_D, addr);
++	for (addr = CKSEG0; addr < CKSEG0 + 32768; addr += 32)
++		cache_op(Index_Invalidate_I, addr);
++	__asm__ __volatile__("sync; lw $0, 0(%0)" :: "r" (CKSEG1) : "memory");
++	for (addr = CKSEG0; addr < CKSEG0 + 512 * 1024; addr += 64)
++		cache_op(Index_Writeback_Inv_SD, addr);
++	__asm__ __volatile__("sync; lw $0, 0(%0)" :: "r" (CKSEG1) : "memory");
++}
++
+ void kexec_reboot(void)
+ {
+ 	void (*do_kexec)(void) __noreturn;
+@@ -202,7 +228,12 @@ void kexec_reboot(void)
+ 	local_flush_icache_range(reboot_code_buffer,
+ 				 reboot_code_buffer + relocate_new_kernel_size);
+ 
+-	do_kexec = (void *)reboot_code_buffer;
++	if (x2000_kexec()) {
++		x2000_kexec_flush();
++		do_kexec = (void *)CKSEG1ADDR(reboot_code_buffer);
++	} else {
++		do_kexec = (void *)reboot_code_buffer;
++	}
+ 	do_kexec();
+ }
+ 
+diff --git a/arch/mips/kernel/relocate_kernel.S b/arch/mips/kernel/relocate_kernel.S
+index de894a021..854538b7d 100644
+--- a/arch/mips/kernel/relocate_kernel.S
++++ b/arch/mips/kernel/relocate_kernel.S
+@@ -10,6 +10,7 @@
+ #include <asm/mipsregs.h>
+ #include <asm/stackframe.h>
+ #include <asm/addrspace.h>
++#include <asm/cacheops.h>
+ 
+ #include <kernel-entry-init.h>
+ 
+@@ -82,6 +83,38 @@ done:
+ 	LONG_S		zero,(t0)
+ #endif
+ 
++#ifdef CONFIG_INGENIC_X2000_SMP
++	/* Executing from KSEG1: write back the newly copied image before
++	 * jumping to its cached entry. Match X2000 SDK soc/cache.h ordering.
++	 * Temporary registers only; preserve entry and firmware arguments.
++	 */
++	mfc0		t0, CP0_PRID
++	li		t1, 0xffffff00
++	and		t0, t0, t1
++	li		t1, 0x00132000
++	bne		t0, t1, 4f
++	li		t0, CKSEG0
++	li		t1, CKSEG0 + 32768
++1:	cache		Index_Writeback_Inv_D, 0(t0)
++	addiu		t0, t0, 32
++	bne		t0, t1, 1b
++	li		t0, CKSEG0
++2:	cache		Index_Invalidate_I, 0(t0)
++	addiu		t0, t0, 32
++	bne		t0, t1, 2b
++	li		t2, CKSEG1
++	sync
++	lw		zero, 0(t2)
++	li		t0, CKSEG0
++	li		t1, CKSEG0 + (512 * 1024)
++3:	cache		Index_Writeback_Inv_SD, 0(t0)
++	addiu		t0, t0, 64
++	bne		t0, t1, 3b
++	sync
++	lw		zero, 0(t2)
++4:
++#endif
++
+ #ifdef CONFIG_CPU_CAVIUM_OCTEON
+ 	/* We need to flush I-cache before jumping to new kernel.
+ 	 * Unfortunately, this code is cpu-specific.
+-- 
+2.55.0
+

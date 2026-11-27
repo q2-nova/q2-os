@@ -1,0 +1,46 @@
+#!/bin/sh
+# Existing UBI only. No erase, format, create-volume, owner-config import.
+set -eu
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+umask 077
+mkdir -p /run/q2 /mnt/userdata /state
+echo missing > /run/q2/state-status
+fail() { echo "Q2_STATE_ERROR: $*" >&2; exit 1; }
+number=
+for path in /sys/class/mtd/mtd[0-9]*; do
+    [ -f "$path/name" ] || continue
+    [ "$(cat "$path/name")" = userdata ] || continue
+    [ -z "$number" ] || fail 'duplicate userdata partition'
+    number=${path##*mtd}
+done
+[ -n "$number" ] || fail 'userdata partition absent'
+ubi=
+for path in /sys/class/ubi/ubi[0-9]*; do
+    [ -f "$path/mtd_num" ] || continue
+    [ "$(cat "$path/mtd_num")" = "$number" ] || continue
+    [ -z "$ubi" ] || fail 'duplicate UBI attachment'
+    ubi=${path##*/}
+done
+if [ -z "$ubi" ]; then
+    attached=$(/sbin/q2-ubi-attach) || fail 'existing UBI attach failed'
+    case "$attached" in ''|*[!0-9]*) fail 'invalid UBI attach response' ;; esac
+    ubi=ubi$attached
+fi
+volume=
+for path in /sys/class/ubi/"$ubi"_*; do
+    [ -f "$path/name" ] || continue
+    [ "$(cat "$path/name")" = user_data ] || continue
+    [ -z "$volume" ] || fail 'duplicate user_data volume'
+    volume=${path##*/}
+done
+[ -n "$volume" ] || fail 'user_data volume missing; explicit provisioning required'
+mount -t ubifs -o nosuid,nodev "/dev/$volume" /mnt/userdata || fail 'UBIFS mount failed'
+[ ! -L /mnt/userdata/q2-mainline ] || fail 'state namespace is a symlink'
+mkdir -p /mnt/userdata/q2-mainline
+mount --bind /mnt/userdata/q2-mainline /state || fail 'state bind failed'
+for dir in Q2Navidrome trust; do
+    [ ! -L "/state/$dir" ] || fail 'state subdirectory is a symlink'
+    mkdir -p "/state/$dir"
+done
+echo ready > /run/q2/state-status
+echo Q2_STATE=ready

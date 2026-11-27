@@ -1,0 +1,82 @@
+#!/bin/sh
+# Emulator development bundles. Hash integrity, NOT remote update authorization.
+# Immutable cold-boot root is never modified. Candidate selection is one-shot.
+set -eu
+base=/state/os
+valid_id() { case "$1" in ''|*[!a-zA-Z0-9_-]*) return 1;; esac; [ "${#1}" -le 64 ]; }
+state_ready() { [ "$(cat /run/q2/state-status)" = ready ]; }
+verify() { (cd "$1" && sha256sum -c manifest.sha256); }
+case "${1:-}" in
+stage)
+    [ "$#" -eq 4 ] || exit 2
+    state_ready
+    src=$2; id=$3; expected=$4
+    valid_id "$id" || exit 2
+    case "$expected" in ''|*[!0-9a-f]*) exit 2;; esac
+    [ "${#expected}" -eq 64 ] || exit 2
+    mkdir -p "$base"
+    mkdir "$base/lock" || exit 1
+    trap 'rm -rf "$base/staging"; rmdir "$base/lock"' EXIT
+    [ ! -e "$base/$id" ] && [ ! -e "$base/pending" ] || exit 1
+    mkdir "$base/staging"
+    for name in kernel.elf rootfs.cpio.gz manifest.sha256; do
+        [ -f "$src/$name" ] && [ ! -L "$src/$name" ] || exit 1
+        cp "$src/$name" "$base/staging/$name"
+        if [ "$name" = kernel.elf ] && [ "${Q2_UPDATE_TEST_CUT:-}" = kernel-copy ] && grep -qw q2.test-faults=1 /proc/cmdline; then
+            echo Q2_UPDATE_CUT
+            kill -STOP $$
+        fi
+    done
+    actual=$(sha256sum "$base/staging/manifest.sha256"); [ "${actual%% *}" = "$expected" ] || exit 1
+    # Permit exactly the two literal filenames; never interpret manifest paths.
+    [ "$(wc -l < "$base/staging/manifest.sha256")" -eq 2 ] || exit 1
+    sed -n '1p' "$base/staging/manifest.sha256" | grep -Eq '^[0-9a-f]{64}  kernel\.elf$'
+    sed -n '2p' "$base/staging/manifest.sha256" | grep -Eq '^[0-9a-f]{64}  rootfs\.cpio\.gz$'
+    verify "$base/staging"
+    sync
+    mv "$base/staging" "$base/$id"
+    sync
+    echo "$id" > "$base/pending.new"
+    sync
+    mv "$base/pending.new" "$base/pending"
+    sync
+    echo Q2_OS_UPDATE=staged
+    ;;
+boot)
+    state_ready || exit 0
+    # A candidate must never recursively select another candidate.
+    grep -q 'q2.bundle=' /proc/cmdline && exit 0
+    mkdir -p "$base"
+    # No writer survives reboot. Remove incomplete publication, keep complete bundles.
+    rm -rf "$base/staging" "$base/lock" "$base/pending.new"
+    if [ -f "$base/trial" ]; then
+        mv "$base/trial" "$base/failed"
+        sync
+        echo Q2_OS_UPDATE=rolled-back
+    fi
+    [ -f "$base/pending" ] || exit 0
+    id=$(cat "$base/pending"); valid_id "$id" || exit 1
+    # Consume before loading or jumping: every failure returns to immutable root.
+    mv "$base/pending" "$base/trial"
+    sync
+    verify "$base/$id" || exit 1
+    args="console=ttyS3,115200 earlycon mem=128M lpj=1000000 panic=5 q2.bundle=$id"
+    kexec -l "$base/$id/kernel.elf" --initrd="$base/$id/rootfs.cpio.gz" --append="$args" || exit 1
+    sync
+    q2-watchdog-guard handoff
+    ;;
+confirm)
+    state_ready
+    id=$(cat "$base/trial"); valid_id "$id"
+    grep -qw "q2.bundle=$id" /proc/cmdline
+    [ "$(cat /etc/q2-bundle-id)" = "$id" ]
+    pid=$(cat /run/q2nd/player.pid)
+    case "$pid" in ''|*[!0-9]*) exit 1;; esac
+    kill -0 "$pid"
+    [ "$(cat /run/q2nd/healthy)" = "$pid" ]
+    mv "$base/trial" "$base/confirmed"
+    sync
+    echo Q2_OS_UPDATE=confirmed-one-shot
+    ;;
+*) echo 'usage: q2-os-update stage DIR ID MANIFEST_SHA256 | boot | confirm' >&2; exit 2;;
+esac

@@ -1,0 +1,2 @@
+# Key-only SSH. No outside-network path is attached by the emulator runner.
+DROPBEAR_ARGS="-s -g -p 22"

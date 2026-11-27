@@ -1,0 +1,23 @@
+#!/bin/sh
+grep -qw q2.diagnostic=1 /proc/cmdline && exit 0
+case "$1" in
+start)
+    mkdir -p /run/q2nd /state/app
+    /usr/sbin/q2-player-supervisor >> /run/q2nd/supervisor.log 2>&1 &
+    n=0
+    while [ ! -S /run/q2nd/health.sock ] && [ ! -f /run/q2nd/rescue ]; do
+        n=$((n+1)); [ "$n" -lt 50 ] || exit 1
+        sleep 0.1
+    done
+    ;;
+stop)
+    if [ -f /run/q2nd/supervisor.pid ]; then
+        kill -TERM "$(cat /run/q2nd/supervisor.pid)" 2>/dev/null || :
+        n=0
+        while [ -S /run/q2nd/health.sock ]; do
+            n=$((n+1)); [ "$n" -lt 30 ] || exit 1
+            sleep 0.1
+        done
+    fi
+    ;;
+esac

@@ -1,0 +1,89 @@
+From f0cbc1f18af9d1d61f5f4848b9459f69cab5a1ea Mon Sep 17 00:00:00 2001
+From: Q2 development <noreply@localhost>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] Preserve bounded IPS and transactional suspend admission
+
+Retain the installed Q2 fixes: bound the IPS-worker wait while memory is live, and reject failed retention admission before quiescing the radio.
+---
+ os_dep/linux/os_intfs.c  |  9 ++++++++-
+ os_dep/linux/sdio_intf.c | 19 +++++++++++--------
+ 2 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/os_dep/linux/os_intfs.c b/os_dep/linux/os_intfs.c
+index 41267d1..a6608a8 100644
+--- a/os_dep/linux/os_intfs.c
++++ b/os_dep/linux/os_intfs.c
+@@ -5304,8 +5304,15 @@ int rtw_suspend_common(_adapter *padapter)
+ 
+ 	pwrpriv->bInSuspend = _TRUE;
+ 
+-	while (pwrpriv->bips_processing == _TRUE)
++	while (READ_ONCE(pwrpriv->bips_processing) == _TRUE) {
++		/* A stuck IPS worker must refuse sleep while DRAM is still live. */
++		if (rtw_get_passing_time_ms(start_time) >= 1000) {
++			pwrpriv->bInSuspend = _FALSE;
++			pdbgpriv->dbg_suspend_error_cnt++;
++			return -EBUSY;
++		}
+ 		rtw_msleep_os(1);
++	}
+ 
+ #ifdef CONFIG_IOL_READ_EFUSE_MAP
+ 	if (!padapter->bup) {
+diff --git a/os_dep/linux/sdio_intf.c b/os_dep/linux/sdio_intf.c
+index cfb1be1..522fbdb 100755
+--- a/os_dep/linux/sdio_intf.c
++++ b/os_dep/linux/sdio_intf.c
+@@ -1294,25 +1294,24 @@ static int rtw_sdio_suspend(struct device *dev)
+ 	func = dev_to_sdio_func(dev);
+ 	psdpriv = sdio_get_drvdata(func);
+ 	if (psdpriv == NULL)
+-		goto exit;
++		return ret;
+ 
+ 	pwrpriv = dvobj_to_pwrctl(psdpriv);
+ 	padapter = dvobj_get_primary_adapter(psdpriv);
+ 	pdbgpriv = &psdpriv->drv_dbg;
+ 	if (rtw_is_drv_stopped(padapter)) {
+ 		RTW_INFO("%s bDriverStopped == _TRUE\n", __func__);
+-		goto exit;
++		return ret;
+ 	}
+ 
+ 	if (pwrpriv->bInSuspend == _TRUE) {
+ 		RTW_INFO("%s bInSuspend = %d\n", __func__, pwrpriv->bInSuspend);
+ 		pdbgpriv->dbg_suspend_error_cnt++;
+-		goto exit;
++		return ret;
+ 	}
+ 
+-	ret = rtw_suspend_common(padapter);
+-
+-exit:
++	/* Validate retention before quiescing: PM will not resume a device
++	 * whose suspend callback failed. Never strand the radio on refusal. */
+ #ifdef CONFIG_RTW_SDIO_PM_KEEP_POWER
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 34))
+ 	/* Android 4.0 don't support WIFI close power */
+@@ -1329,12 +1328,16 @@ exit:
+ 		return -ENOSYS;
+ 	} else {
+ 		RTW_INFO("cmd: suspend with MMC_PM_KEEP_POWER\n");
+-		sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
++		ret = sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
++		if (ret) {
++			pdbgpriv->dbg_suspend_error_cnt++;
++			return ret;
++		}
+ 	}
+ #endif
+ #endif
+ 
+-	return ret;
++	return rtw_suspend_common(padapter);
+ }
+ int rtw_resume_process(_adapter *padapter)
+ {
+-- 
+2.55.0
+

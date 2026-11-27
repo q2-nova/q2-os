@@ -1,0 +1,193 @@
+From b2a8ef074792f6fbe4d8bcec8c94a78eca3864ea Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 15:31:28 -0600
+Subject: [PATCH] Add live switches for SDIO wakeup sources
+
+Five module parameters, 0644 and read live, each defaulting to the
+current behaviour, for A/B tests of the Wi-Fi driver's SDIO operations
+and command-thread wakeups on the Q2 (screen-off playback: kworker
+77 switches/s running sdio_irq_work, RTW_CMD_THREAD 61/s, mmc1 184
+interrupts/s; every SDIO command is a sleep of the calling thread):
+
+- rtw_sdio_rx_reread (1): 0 skips the HISR re-read after draining the
+  RX FIFO, one CMD53 per card interrupt. RX_REQUEST is not write-1-clear
+  and follows the FIFO, so data left behind raises the card interrupt
+  again after the SDIO core re-enables it.
+- rtw_btc_ver_poll_max (-1): caps the Bluetooth patch-version queries
+  (an H2C, a 50 ms wait and a C2H reply every 2 s in active mode until
+  Bluetooth answers; the Q2 runs no Bluetooth stack).
+- rtw_lps_leave_dedup (0): 1 queues one RX-traffic LPS leave at a time
+  instead of one per received unicast frame past the threshold.
+- rtw_dm_wd_div (1): runs the phydm watchdog (tens of register
+  operations) in every Nth 2 s dynamic check.
+- rtw_check_fw_ps (1, now a parameter): 0 skips the firmware PS-state
+  read and write after each LPS leave, which feed debug counters only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ core/rtw_cmd.c                   | 10 +++++++++-
+ core/rtw_pwrctrl.c               |  8 +++++++-
+ hal/hal_btcoex.c                 |  7 ++++++-
+ hal/rtl8733b/sdio/rtl8733bs_io.c |  5 ++++-
+ os_dep/linux/os_intfs.c          | 26 ++++++++++++++++++++++++++
+ 5 files changed, 52 insertions(+), 4 deletions(-)
+
+diff --git a/core/rtw_cmd.c b/core/rtw_cmd.c
+index 11049f5..9c0f808 100755
+--- a/core/rtw_cmd.c
++++ b/core/rtw_cmd.c
+@@ -2715,8 +2715,13 @@ void rtw_iface_dynamic_chk_wk_hdl(_adapter *padapter)
+ 
+ 
+ }
++extern int rtw_dm_wd_div;
++extern ATOMIC_T rtw_rx_leave_queued;
+ void rtw_dynamic_chk_wk_hdl(_adapter *padapter)
+ {
++	static u32 dm_checks;
++	int dm_div = READ_ONCE(rtw_dm_wd_div);
++
+ 	rtw_mi_dynamic_chk_wk_hdl(padapter);
+ #ifdef CONFIG_MP_INCLUDED
+ 	if (rtw_mp_mode_check(padapter) == _FALSE)
+@@ -2735,7 +2740,8 @@ void rtw_dynamic_chk_wk_hdl(_adapter *padapter)
+ #endif
+ 		dm_DynamicUsbTxAgg(padapter, 0);
+ 	}
+-	rtw_hal_dm_watchdog(padapter);
++	if (dm_div <= 1 || dm_checks++ % dm_div == 0)
++		rtw_hal_dm_watchdog(padapter);
+ 
+ 	/* check_hw_pbc(padapter, pdrvextra_cmd->pbuf, pdrvextra_cmd->type); */
+ 
+@@ -2885,6 +2891,8 @@ void lps_ctrl_wk_hdl(_adapter *padapter, u8 lps_ctrl_type, u8 *buf)
+ 		LPS_Leave(padapter, "LPS_CTRL_TX_TRAFFIC_LEAVE");
+ 		break;
+ 	case LPS_CTRL_RX_TRAFFIC_LEAVE:
++		/* A frame arriving from here on queues a new leave. */
++		ATOMIC_SET(&rtw_rx_leave_queued, 0);
+ 		LPS_Leave(padapter, "LPS_CTRL_RX_TRAFFIC_LEAVE");
+ 		break;
+ 	case LPS_CTRL_ENTER:
+diff --git a/core/rtw_pwrctrl.c b/core/rtw_pwrctrl.c
+index c24f14e..8d69652 100755
+--- a/core/rtw_pwrctrl.c
++++ b/core/rtw_pwrctrl.c
+@@ -18,6 +18,10 @@
+ #include <hal_data.h>
+ #include <hal_com_h2c.h>
+ 
++extern int rtw_check_fw_ps, rtw_lps_leave_dedup;
++/* One queued RX-traffic LPS leave (rtw_lps_leave_dedup). */
++ATOMIC_T rtw_rx_leave_queued;
++
+ #ifdef DBG_CHECK_FW_PS_STATE
+ int rtw_fw_ps_state(PADAPTER padapter)
+ {
+@@ -28,7 +32,7 @@ int rtw_fw_ps_state(PADAPTER padapter)
+ 	struct pwrctrl_priv *pwrpriv = adapter_to_pwrctl(padapter);
+ 	struct registry_priv  *registry_par = &padapter->registrypriv;
+ 
+-	if (registry_par->check_fw_ps != 1)
++	if (registry_par->check_fw_ps != 1 || READ_ONCE(rtw_check_fw_ps) != 1)
+ 		return _SUCCESS;
+ 
+ 	_enter_pwrlock(&pwrpriv->check_32k_lock);
+@@ -459,6 +463,8 @@ void	traffic_check_for_leave_lps(PADAPTER padapter, u8 tx, u32 tx_packets)
+ 	if (bLeaveLPS) {
+ 		/* RTW_INFO("leave lps via %s, Tx = %d, Rx = %d\n", tx?"Tx":"Rx", pmlmepriv->LinkDetectInfo.NumTxOkInPeriod,pmlmepriv->LinkDetectInfo.NumRxUnicastOkInPeriod);	 */
+ 		/* rtw_lps_ctrl_wk_cmd(padapter, LPS_CTRL_LEAVE, 0); */
++		if (!tx && READ_ONCE(rtw_lps_leave_dedup) && ATOMIC_INC_RETURN(&rtw_rx_leave_queued) != 1)
++			return;
+ 		rtw_lps_ctrl_wk_cmd(padapter, tx ? LPS_CTRL_TX_TRAFFIC_LEAVE : LPS_CTRL_RX_TRAFFIC_LEAVE, tx ? RTW_CMDF_DIRECTLY : 0);
+ 	}
+ }
+diff --git a/hal/hal_btcoex.c b/hal/hal_btcoex.c
+index 61c256f..e3b3f24 100755
+--- a/hal/hal_btcoex.c
++++ b/hal/hal_btcoex.c
+@@ -6179,15 +6179,20 @@ static void hal_btcoex_trx_info_notify(PADAPTER padapter)
+ 	EXhalbtcoutsrc_thtp_notify(&GLBtCoexist, podmpriv->rx_tp, podmpriv->tx_tp);
+ }
+ 
++extern int rtw_btc_ver_poll_max;
++
+ void hal_btcoex_Hanlder(PADAPTER padapter)
+ {
++	static int ver_polls;
+ 	u32	bt_patch_ver;
+ 
+ 	hal_btcoex_trx_info_notify(padapter);
+ 
+ 	EXhalbtcoutsrc_periodical(&GLBtCoexist);
+ 
+-	if (GLBtCoexist.bt_info.bt_get_fw_ver == 0) {
++	if (GLBtCoexist.bt_info.bt_get_fw_ver == 0
++	    && (READ_ONCE(rtw_btc_ver_poll_max) < 0 || ver_polls < READ_ONCE(rtw_btc_ver_poll_max))) {
++		ver_polls++;
+ 		GLBtCoexist.btc_get(&GLBtCoexist, BTC_GET_U4_BT_PATCH_VER, &bt_patch_ver);
+ 		GLBtCoexist.bt_info.bt_get_fw_ver = bt_patch_ver;
+ 	}
+diff --git a/hal/rtl8733b/sdio/rtl8733bs_io.c b/hal/rtl8733b/sdio/rtl8733bs_io.c
+index 0ead172..d2baa8a 100755
+--- a/hal/rtl8733b/sdio/rtl8733bs_io.c
++++ b/hal/rtl8733b/sdio/rtl8733bs_io.c
+@@ -378,6 +378,8 @@ _exit:
+ }
+ #endif
+ 
++extern int rtw_sdio_rx_reread;
++
+ void sd_int_dpc(PADAPTER adapter)
+ {
+ 	PHAL_DATA_TYPE phal;
+@@ -506,7 +508,8 @@ void sd_int_dpc(PADAPTER adapter)
+ 			#endif
+ 			#endif /* CONFIG_MAC_LOOPBACK_DRIVER */
+ 			rx_len = 0;
+-			rtl8733bs_get_interrupt(adapter, NULL, &rx_len);
++			if (READ_ONCE(rtw_sdio_rx_reread))
++				rtl8733bs_get_interrupt(adapter, NULL, &rx_len);
+ 		} while (1);
+ 
+ 		if (rx_fail_time == 10)
+diff --git a/os_dep/linux/os_intfs.c b/os_dep/linux/os_intfs.c
+index 488d121..c271985 100644
+--- a/os_dep/linux/os_intfs.c
++++ b/os_dep/linux/os_intfs.c
+@@ -167,6 +167,32 @@ int rtw_wmm_smart_ps = 2;
+ #endif /* CONFIG_WMMPS_STA */
+ 
+ int rtw_check_fw_ps = 1;
++/* Q2 wakeup tests: read live. 1 checks the firmware PS state (0x8F) after
++ * every LPS leave and 32K wake, two SDIO operations that only feed debug
++ * counters; 0 skips the check. */
++module_param(rtw_check_fw_ps, int, 0644);
++MODULE_PARM_DESC(rtw_check_fw_ps, "1: check the firmware PS state after leaving LPS (default); 0: skip, saving two SDIO operations per leave");
++/* 1 re-reads HISR after draining the RX FIFO (one CMD53 per card interrupt);
++ * 0 relies on RX_REQUEST, which is not write-1-clear and follows the FIFO,
++ * to raise the card interrupt again for data left behind. */
++int rtw_sdio_rx_reread = 1;
++module_param(rtw_sdio_rx_reread, int, 0644);
++MODULE_PARM_DESC(rtw_sdio_rx_reread, "1: re-read HISR after each RX FIFO read (default); 0: leave remaining data to the next card interrupt");
++/* Bluetooth patch-version queries: each is an H2C, a 50 ms wait and a C2H
++ * reply, every 2 s in active mode until Bluetooth answers. -1 unlimited. */
++int rtw_btc_ver_poll_max = -1;
++module_param(rtw_btc_ver_poll_max, int, 0644);
++MODULE_PARM_DESC(rtw_btc_ver_poll_max, "Bluetooth patch-version queries before giving up; -1 unlimited (default)");
++/* 1 queues at most one RX-traffic LPS leave until the command thread has
++ * handled it; 0 queues one per received unicast frame past the threshold. */
++int rtw_lps_leave_dedup = 0;
++module_param(rtw_lps_leave_dedup, int, 0644);
++MODULE_PARM_DESC(rtw_lps_leave_dedup, "1: one queued RX-traffic LPS leave at a time; 0: one per frame (default)");
++/* The phydm watchdog (DIG, CCK PD, thermal, CFO tracking: tens of SDIO
++ * operations) runs in every Nth 2 s dynamic check; 1 every check. */
++int rtw_dm_wd_div = 1;
++module_param(rtw_dm_wd_div, int, 0644);
++MODULE_PARM_DESC(rtw_dm_wd_div, "Run the phydm watchdog every Nth 2 s check; 1 every check (default)");
+ 
+ #ifdef CONFIG_TX_EARLY_MODE
+ int rtw_early_mode = 1;
+-- 
+2.56.0
+

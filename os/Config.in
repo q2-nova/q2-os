@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_Q2_PATH/package/q2-probes/Config.in"
+source "$BR2_EXTERNAL_Q2_PATH/package/q2-platform/Config.in"

@@ -1,0 +1,17 @@
+#!/bin/sh
+# A fresh/invalid RTC must not leave generated development userspace in 1970.
+# A build-date floor is not synchronized time and must not be written to RTC.
+case "$1" in
+    start)
+        mkdir -p /run/q2
+        floor=$(cat /etc/q2-build-epoch) || exit 1
+        case "$floor" in ''|*[!0-9]*) exit 1 ;; esac
+        now=$(date +%s) || exit 1
+        if [ "$now" -lt "$floor" ]; then
+            date -u -s "@$floor" >/dev/null || exit 1
+            echo build-floor-unsynchronized > /run/q2/clock-status
+        else
+            echo rtc-or-system > /run/q2/clock-status
+        fi
+        ;;
+esac

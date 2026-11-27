@@ -1,0 +1,282 @@
+From bbf833ce284b952a708cc9ebf70eae645b4fe708 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:40:09 -0500
+Subject: [PATCH 7/7] MIPS: dts: wire Q2 I2C buses, fuel gauge, buttons and
+ microSD
+
+Use soc_i2c.sh, soc_msc.sh, cw2015.sh and keyboard_gpio_add.sh from the
+stock V1.32 firmware for board wiring. Reuse mainline I2C, CW2015 and
+gpio-keys drivers. Preserve the factory gauge profile; no battery
+profile or design capacity is invented.
+
+Limit the microSD clock to 50 MHz without UHS until hardware validation.
+Exercise gauge values, all button press/release events and SD block I/O
+in the emulator. The AXP2101 charger driver, SPI NAND and filesystem
+root boot are not supplied by this patch.
+---
+ arch/mips/boot/dts/ingenic/shanling-q2.dts | 119 +++++++++++++++++++++
+ arch/mips/boot/dts/ingenic/x2000.dtsi      |  82 ++++++++++++++
+ arch/mips/configs/shanling_q2_defconfig    |  14 +++
+ 3 files changed, 215 insertions(+)
+
+diff --git a/arch/mips/boot/dts/ingenic/shanling-q2.dts b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+index 82088a509..4e2c80635 100644
+--- a/arch/mips/boot/dts/ingenic/shanling-q2.dts
++++ b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+@@ -8,6 +8,8 @@
+ /dts-v1/;
+ 
+ #include "x2000.dtsi"
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
+ 
+ / {
+ 	model = "Shanling Q2";
+@@ -15,6 +17,11 @@ / {
+ 
+ 	aliases {
+ 		serial0 = &uart0;
++		i2c0 = &i2c0;
++		i2c2 = &i2c2;
++		i2c3 = &i2c3;
++		i2c5 = &i2c5;
++		mmc0 = &msc2;
+ 		serial3 = &uart3;
+ 	};
+ 
+@@ -26,6 +33,50 @@ memory@0 {
+ 		device_type = "memory";
+ 		reg = <0x0 0x8000000>;
+ 	};
++
++	keys {
++		compatible = "gpio-keys";
++		label = "Q2 buttons";
++		button-power {
++			label = "power";
++			linux,code = <KEY_POWER>;
++			gpios = <&gpe 31 GPIO_ACTIVE_LOW>;
++			debounce-interval = <10>;
++		};
++		button-return {
++			label = "return";
++			linux,code = <KEY_UP>;
++			gpios = <&gpb 18 GPIO_ACTIVE_LOW>;
++			debounce-interval = <10>;
++		};
++		button-play {
++			label = "play";
++			linux,code = <KEY_DOWN>;
++			gpios = <&gpb 17 GPIO_ACTIVE_LOW>;
++			debounce-interval = <10>;
++		};
++		button-previous {
++			label = "previous";
++			linux,code = <KEY_PREVIOUSSONG>;
++			gpios = <&gpb 16 GPIO_ACTIVE_LOW>;
++			debounce-interval = <10>;
++		};
++		button-next {
++			label = "next";
++			linux,code = <KEY_NEXTSONG>;
++			gpios = <&gpe 26 GPIO_ACTIVE_HIGH>;
++			debounce-interval = <10>;
++		};
++	};
++
++	vcc_sd: regulator-sd {
++		compatible = "regulator-fixed";
++		regulator-name = "vcc-sd";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		gpio = <&gpa 12 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
+ };
+ 
+ &uart0 {
+@@ -35,3 +86,71 @@ &uart0 {
+ &uart3 {
+ 	status = "okay";
+ };
++
++&pinctrl {
++	i2c0_pins: i2c0-pins {
++		function = "i2c0";
++		groups = "i2c0-data";
++	};
++	i2c2_pins: i2c2-pins {
++		function = "i2c2";
++		groups = "i2c2-data-b";
++	};
++	i2c3_pins: i2c3-pins {
++		function = "i2c3";
++		groups = "i2c3-data-a";
++	};
++	i2c5_pins: i2c5-pins {
++		function = "i2c5";
++		groups = "i2c5-data-d";
++	};
++	msc2_pins: mmc2-pins {
++		function = "mmc2";
++		groups = "mmc2-1bit", "mmc2-4bit";
++	};
++};
++
++&i2c0 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c0_pins>;
++	clock-frequency = <200000>;
++	battery-gauge@62 {
++		compatible = "cellwise,cw2015";
++		reg = <0x62>;
++	};
++};
++
++&i2c2 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c2_pins>;
++	clock-frequency = <200000>;
++};
++
++&i2c3 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c3_pins>;
++	clock-frequency = <200000>;
++};
++
++&i2c5 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c5_pins>;
++	clock-frequency = <400000>;
++};
++
++&msc2 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&msc2_pins>;
++	vmmc-supply = <&vcc_sd>;
++	bus-width = <4>;
++	broken-cd;
++	cap-sd-highspeed;
++	no-1-8-v;
++	/* Start conservatively; UHS tuning needs hardware validation. */
++	max-frequency = <50000000>;
++};
+diff --git a/arch/mips/boot/dts/ingenic/x2000.dtsi b/arch/mips/boot/dts/ingenic/x2000.dtsi
+index 6ad411109..884e35ae1 100644
+--- a/arch/mips/boot/dts/ingenic/x2000.dtsi
++++ b/arch/mips/boot/dts/ingenic/x2000.dtsi
+@@ -192,4 +192,86 @@ uart3: serial@10033000 {
+ 		clock-names = "baud", "module";
+ 		status = "disabled";
+ 	};
++
++	i2c0: i2c@10050000 {
++		compatible = "ingenic,x2000-i2c", "ingenic,x1000-i2c";
++		reg = <0x10050000 0x1000>;
++		interrupt-parent = <&intc>;
++		interrupts = <61>;
++		clocks = <&cgu X2000_CLK_I2C0>;
++		clock-frequency = <100000>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "disabled";
++	};
++
++	i2c1: i2c@10051000 {
++		compatible = "ingenic,x2000-i2c", "ingenic,x1000-i2c";
++		reg = <0x10051000 0x1000>;
++		interrupt-parent = <&intc>;
++		interrupts = <60>;
++		clocks = <&cgu X2000_CLK_I2C1>;
++		clock-frequency = <100000>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "disabled";
++	};
++
++	i2c2: i2c@10052000 {
++		compatible = "ingenic,x2000-i2c", "ingenic,x1000-i2c";
++		reg = <0x10052000 0x1000>;
++		interrupt-parent = <&intc>;
++		interrupts = <59>;
++		clocks = <&cgu X2000_CLK_I2C2>;
++		clock-frequency = <100000>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "disabled";
++	};
++
++	i2c3: i2c@10053000 {
++		compatible = "ingenic,x2000-i2c", "ingenic,x1000-i2c";
++		reg = <0x10053000 0x1000>;
++		interrupt-parent = <&intc>;
++		interrupts = <58>;
++		clocks = <&cgu X2000_CLK_I2C3>;
++		clock-frequency = <100000>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "disabled";
++	};
++
++	i2c4: i2c@10054000 {
++		compatible = "ingenic,x2000-i2c", "ingenic,x1000-i2c";
++		reg = <0x10054000 0x1000>;
++		interrupt-parent = <&intc>;
++		interrupts = <57>;
++		clocks = <&cgu X2000_CLK_I2C4>;
++		clock-frequency = <100000>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "disabled";
++	};
++
++	i2c5: i2c@10055000 {
++		compatible = "ingenic,x2000-i2c", "ingenic,x1000-i2c";
++		reg = <0x10055000 0x1000>;
++		interrupt-parent = <&intc>;
++		interrupts = <56>;
++		clocks = <&cgu X2000_CLK_I2C5>;
++		clock-frequency = <100000>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "disabled";
++	};
++
++	msc2: mmc@13490000 {
++		compatible = "ingenic,x2000-sdhci";
++		reg = <0x13490000 0x10000>;
++		interrupt-parent = <&intc>;
++		interrupts = <48>;
++		clocks = <&cgu X2000_CLK_MSC_EXCLK>, <&cgu X2000_CLK_MSC2>;
++		clock-names = "ext", "sdhci";
++		status = "disabled";
++	};
+ };
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index e4933e9bb..cbbe06008 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -41,3 +41,17 @@ CONFIG_MAGIC_SYSRQ=y
+ CONFIG_DEBUG_FS=y
+ CONFIG_PANIC_TIMEOUT=10
+ CONFIG_STACKTRACE=y
++CONFIG_I2C=y
++CONFIG_I2C_CHARDEV=y
++CONFIG_I2C_JZ4780=y
++CONFIG_INPUT_EVDEV=y
++CONFIG_KEYBOARD_GPIO=y
++CONFIG_POWER_SUPPLY=y
++CONFIG_BATTERY_CW2015=y
++CONFIG_REGULATOR=y
++CONFIG_REGULATOR_FIXED_VOLTAGE=y
++CONFIG_MMC=y
++CONFIG_MMC_BLOCK=y
++CONFIG_MMC_SDHCI=y
++CONFIG_MMC_SDHCI_PLTFM=y
++CONFIG_MMC_SDHCI_INGENIC=y

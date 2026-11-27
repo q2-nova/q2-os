@@ -1,0 +1,62 @@
+#!/bin/sh
+# Minimal kernel-resident recovery for a missing/unmountable main rootfs.
+bootmark() {
+    file=/run/q2/boot-times
+    [ ! -L "$file" ] && { [ ! -e "$file" ] || { [ -f "$file" ] && [ "$(wc -c < "$file")" -lt 65408 ]; }; } || return 0
+    read -r uptime idle 2>/dev/null < /proc/uptime || return 0
+    case "$uptime" in *.*) ;; *) return 0 ;; esac
+    case "${uptime%.*}:${uptime#*.}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+    printf '%s %s\n' "$uptime" "$1" >> "$file" 2>/dev/null || :
+}
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+/bin/busybox --install -s /bin
+mount -t devtmpfs none /dev
+mount -t proc none /proc
+mount -t sysfs none /sys
+# Bounded: a tmpfs mount without size= may take half of RAM (58 MB each),
+# and memory in tmpfs cannot be reclaimed. 32 MB of it stopped the Q2
+# (docs/bugs/thrash-watchdog-reset.md). /run held about 0.3 MB ten minutes
+# after boot; /tmp fits one staged 16-20 MB binary.
+mount -t tmpfs -o mode=0755,nosuid,nodev,size=8m none /run
+mount -t tmpfs -o mode=1777,size=24m none /tmp
+mkdir -p /dev/pts /run/log /run/q2 /newroot
+bootmark bootstrap-filesystems-ready
+mount -t devpts none /dev/pts
+exec </dev/ttyS3 >/dev/ttyS3 2>&1
+hostname q2-install-rescue
+umask 077
+root_device=
+for entry in /sys/class/mtd/mtd[0-9]*; do
+    [ -f "$entry/name" ] || continue
+    [ "$(cat "$entry/name")" = rootfs ] || continue
+    root_device=/dev/mtdskip${entry##*mtd}
+done
+bootmark bootstrap-root-mount-begin
+if [ -b "$root_device" ] && mount -t squashfs -o ro "$root_device" /newroot &&
+   [ -x /newroot/sbin/q2-installed-init ]; then
+    bootmark bootstrap-root-mounted
+    moved=
+    ready=true
+    bootmark bootstrap-switch-root-begin
+    for name in dev proc sys run tmp; do
+        if mount --move "/$name" "/newroot/$name"; then
+            moved="$name $moved"
+        else
+            ready=false
+            break
+        fi
+    done
+    if "$ready"; then
+        exec switch_root /newroot /sbin/q2-installed-init
+    fi
+    for name in $moved; do mount --move "/newroot/$name" "/$name"; done
+fi
+bootmark bootstrap-root-failed
+echo Q2_INSTALL_ROOT_FAILED
+/sbin/q2-diagnostic-usb &&
+    /sbin/q2-diagnostic-ssh > /run/log/ssh 2>&1 &
+echo 'Root mount failed; independent stock key recovery remains available.'
+if grep -qw q2.emulated=1 /proc/cmdline; then
+    while :; do setsid sh -c 'exec sh </dev/ttyS0 >/dev/ttyS0 2>&1'; sleep 1; done
+fi
+while :; do sleep 60; done

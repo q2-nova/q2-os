@@ -1,0 +1,17 @@
+#!/bin/sh
+# Root-only local provisioning, NOT an unauthenticated network time client.
+set -eu
+[ "$#" -eq 2 ] && [ "$1" = --trusted-epoch ] || { echo 'usage: q2-clock-set --trusted-epoch SECONDS' >&2; exit 2; }
+case "$2" in ''|*[!0-9]*) exit 2;; esac
+[ "$2" -ge "$(cat /etc/q2-build-epoch)" ]
+[ "$(cat /run/q2/state-status)" = ready ]
+mkdir -p /state/trust
+# No guessed time is written to RTC by the normal boot path.
+date -u -s "@$2" >/dev/null
+hwclock -w -u
+hwclock -r -u >/dev/null
+printf '%s\n' "$2" > /state/trust/clock-epoch.new
+sync
+mv /state/trust/clock-epoch.new /state/trust/clock-epoch
+sync
+echo provisioned > /run/q2/clock-status

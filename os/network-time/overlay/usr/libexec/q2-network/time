@@ -1,0 +1,110 @@
+#!/bin/sh
+# Explicit basic-NTP service; no owner configuration or custom time bounds.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RUN=/run/q2-time
+PROC=/proc
+LOG=/run/log
+TRUST=/state/trust
+STATUS=/run/q2/clock-status
+STATE_STATUS=/run/q2/state-status
+SELF=/usr/libexec/q2-network/time
+CHRONYD=/usr/libexec/q2-network/chronyd
+CHRONYC=/usr/libexec/q2-network/chronyc
+CONFIG=/etc/q2-network/chrony.conf
+umask 077
+fail() { echo "q2-network-time: $*" >&2; exit 1; }
+owned() {
+    [ -s "$RUN/service.pid" ] || return 1
+    pid=$(cat "$RUN/service.pid")
+    case "$pid" in ''|*[!0-9]*) fail 'invalid service PID' ;; esac
+    [ "$pid" -gt 1 ] || fail 'invalid service PID'
+    kill -0 "$pid" 2>/dev/null || return 1
+    command=$(tr '\000' ' ' < "$PROC/$pid/cmdline")
+    case "$command" in *q2-network/time*watch*) ;; *) fail 'PID is not the time service' ;; esac
+}
+record_sync() {
+    # chronyc waitsync succeeds only after chronyd reports synchronisation.
+    # NTP provenance is explicit; this is not NTS or a locally provisioned clock.
+    printf 'network-ntp\n' > "$STATUS.new"
+    mv "$STATUS.new" "$STATUS"
+    if [ "$rtc_saved" = 0 ] && hwclock -w -u && hwclock -r -u >/dev/null; then
+        rtc_saved=1
+        if [ "$(cat "$STATE_STATUS" 2>/dev/null)" = ready ]; then
+            mkdir -p "$TRUST"
+            if [ ! -e "$TRUST/network-ntp-rtc" ]; then
+                # A source marker, never an epoch/lower bound or NTS claim.
+                printf 'time.cloudflare.com basic-ntp\n' > "$TRUST/network-ntp-rtc.new"
+                sync
+                mv "$TRUST/network-ntp-rtc.new" "$TRUST/network-ntp-rtc"
+                sync
+            fi
+        fi
+    fi
+}
+watch() {
+    mkdir "$RUN/service.lock" 2>/dev/null || fail 'service already active or lock needs recovery'
+    daemon=
+    pause=
+    cleanup() {
+        trap - EXIT HUP INT TERM
+        [ -z "$pause" ] || { kill "$pause" 2>/dev/null || :; wait "$pause" 2>/dev/null || :; }
+        [ -z "$daemon" ] || { kill "$daemon" 2>/dev/null || :; wait "$daemon" 2>/dev/null || :; }
+        rm -f "$RUN/service.pid" "$RUN/chronyd.pid"
+        rmdir "$RUN/service.lock"
+    }
+    trap cleanup EXIT
+    trap 'exit 0' HUP INT TERM
+    echo $$ > "$RUN/service.pid"
+    [ ! -S "$RUN/chronyd.sock" ] || fail 'unowned chrony socket'
+    # Single restart rotation keeps service logs in RAM. No chrony file logging.
+    [ ! -e "$LOG/time.log" ] || mv "$LOG/time.log" "$LOG/time.log.old"
+    "$CHRONYD" -d -u root -f "$CONFIG" > "$LOG/time.log" 2>&1 &
+    daemon=$!
+    rtc_saved=0
+    while kill -0 "$daemon" 2>/dev/null; do
+        if "$CHRONYC" -h "$RUN/chronyd.sock" waitsync 1 >/dev/null 2>&1; then
+            record_sync
+            # Synchronised and the RTC written: nothing is left to poll. Wait
+            # on the daemon itself instead of a chronyc and a sleep a minute.
+            [ "$rtc_saved" = 0 ] || break
+            delay=60
+        else
+            delay=10
+        fi
+        sleep "$delay" &
+        pause=$!
+        wait "$pause" || :
+        pause=
+    done
+    wait "$daemon"
+}
+main() {
+    mkdir -p "$RUN" "$LOG"
+    case "${1:-start}" in
+        start)
+            owned && return 0
+            "$SELF" watch >> "$LOG/time-service.log" 2>&1 &
+            ;;
+        watch) watch ;;
+        online)
+            owned || main start
+            # Retry DNS immediately when DHCP supplies a route/resolver. A
+            # concurrently starting daemon will retry through its normal loop.
+            "$CHRONYC" -h "$RUN/chronyd.sock" online >/dev/null 2>&1 || :
+            ;;
+        stop)
+            if owned; then
+                kill -TERM "$pid"
+                n=0
+                while [ -e "$RUN/service.pid" ] && kill -0 "$pid" 2>/dev/null; do
+                    [ "$n" -lt 10 ] || fail 'time service did not stop'
+                    sleep 1; n=$((n+1))
+                done
+            fi
+            ;;
+        *) fail 'usage: time start|stop|online' ;;
+    esac
+}
+if [ "${Q2_TIME_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

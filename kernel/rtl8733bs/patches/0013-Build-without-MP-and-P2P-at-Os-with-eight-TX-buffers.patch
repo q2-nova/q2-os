@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 23:35:02 -0600
+Subject: [PATCH] Build without MP and P2P, at -Os, with eight TX buffers
+
+Memory headroom on the Q2 (docs/validation/memory-headroom-kernel-2026-11-21.md),
+measured against the V0.123 kernel build:
+
+- CONFIG_MP_INCLUDED off: the factory test mode (iwpriv mp_*). Text
+  -82.5 kB, rodata -12.9 kB.
+- CONFIG_P2P off: Wi-Fi Direct. The player runs one station on wlan0.
+  Text -79.6 kB.
+- -Os instead of -O1. Text -176.5 kB, rodata -11.8 kB.
+- NR_XMITBUFF 16 to 8 for SDIO. Each TX buffer is a 20,992-byte kmalloc,
+  an order-3 (32 KiB) page block: 256 KiB less per adapter at probe, and
+  half the order-3 allocations at each Wi-Fi power-on. Eight buffers hold
+  up to 160 KiB of aggregated frames; the player transmits requests and
+  TCP acknowledgements.
+
+Together: text 1,519,788 to 1,207,140 bytes, rodata 176,338 to 151,254,
+module core 2,032 to 1,696 KiB in pages. AP mode stays: with it off,
+core/rtw_csa.c and the CSA action sender in core/rtw_mlme_ext.c do not
+build (they use the AP-only rf_ctl_t fields under CONFIG_ECSA). The
+/proc/net/rtl8733bs tree (CONFIG_PROC_DEBUG) stays: the player reads
+rx_signal, the Wi-Fi script ap_info and the power tools ps_info.
+BT_COEXIST unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Makefile           | 6 +++---
+ include/rtw_xmit.h | 2 +-
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+--- a/Makefile
++++ b/Makefile
+@@ -1,5 +1,5 @@
+ EXTRA_CFLAGS += $(USER_EXTRA_CFLAGS)
+-EXTRA_CFLAGS += -O1
++EXTRA_CFLAGS += -Os
+ #EXTRA_CFLAGS += -O3
+ #EXTRA_CFLAGS += -Wall
+ #EXTRA_CFLAGS += -Wextra
+@@ -71,8 +71,8 @@
+ ########################## Features ###########################
+ CONFIG_AP_MODE = y
+ CONFIG_ECSA = y
+-CONFIG_P2P = y
+-CONFIG_MP_INCLUDED = y
++CONFIG_P2P = n
++CONFIG_MP_INCLUDED = n
+ CONFIG_POWER_SAVING = y
+ CONFIG_IPS_MODE = default
+ CONFIG_LPS_MODE = default
+--- a/include/rtw_xmit.h
++++ b/include/rtw_xmit.h
+@@ -34,7 +34,7 @@
+ 	#endif
+ 
+ 	#if defined CONFIG_SDIO_HCI
+-		#define NR_XMITBUFF	(16)
++		#define NR_XMITBUFF	(8)
+ 		#define SDIO_TX_DIV_NUM (2)
+ 	#endif
+ 	#if defined(CONFIG_GSPI_HCI)
+-- 
+2.56.0
+

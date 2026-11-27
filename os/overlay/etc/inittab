@@ -1,0 +1,11 @@
+# Development image: serial shell is reachable only through the local emulator.
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mkdir -p /dev/pts /dev/shm
+::sysinit:/bin/mount -a
+::sysinit:/usr/sbin/q2-watchdog-guard boot
+::sysinit:/bin/mkdir -p /run/lock/subsys
+::sysinit:/bin/hostname -F /etc/hostname
+::sysinit:/etc/init.d/rcS
+ttyS0::respawn:/bin/sh
+::shutdown:/etc/init.d/rcK
+::shutdown:/bin/umount -a -r

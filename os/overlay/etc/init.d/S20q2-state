@@ -1,0 +1,29 @@
+#!/bin/sh
+# Never format media automatically. Diagnostics remain available on failure.
+case "$1" in start) ;; *) exit 0 ;; esac
+umask 077
+mkdir -p /run/q2
+status=missing
+for part in /dev/mmcblk*p2; do
+    [ -b "$part" ] || continue
+    if blkid "$part" | grep -q 'LABEL="Q2STATE"'; then
+        if mount -t ext4 -o nosuid,nodev "$part" /state; then
+            status=ready
+        else
+            status=mount-failed
+        fi
+        break
+    fi
+done
+if [ "$status" = ready ]; then
+    mkdir -p /state/Q2Navidrome /state/app /state/ssh
+    if [ ! -e /state/Q2Navidrome/config.toml ]; then
+        defaults=/etc/q2-defaults/mainline.toml
+        grep -qw q2.diagnostic=1 /proc/cmdline && defaults=/etc/q2-defaults/config.toml
+        cp "$defaults" /state/Q2Navidrome/config.toml || status=write-failed
+    fi
+    if ! touch /state/.write-check; then status=write-failed; fi
+    rm -f /state/.write-check
+fi
+echo "$status" > /run/q2/state-status
+echo "Q2_STATE=$status"

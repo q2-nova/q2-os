@@ -1,0 +1,330 @@
+From 4897a8805c090c9fd5ea1a2efce61fb1c3d539b5 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 11:42:36 -0500
+Subject: [PATCH] pwm: add X2000 standalone PWM and Q2 backlight
+
+Use the waveform registers and power-of-two prescaler documented by Ingenic pwm-ingenic-v2.c (Sihui Liu, 2015), cross-checked with stock soc_pwm. Keep the backlight off until explicitly enabled during display bring-up. The 50 MHz source is an SDK-derived bring-up choice; physical waveform timing remains unverified.
+---
+ .../bindings/pwm/ingenic,x2000-pwm.yaml       |  47 ++++++
+ arch/mips/boot/dts/ingenic/shanling-q2.dts    |  23 +++
+ arch/mips/boot/dts/ingenic/x2000.dtsi         |   8 +
+ arch/mips/configs/shanling_q2_defconfig       |   4 +
+ drivers/pwm/Kconfig                           |   9 +
+ drivers/pwm/Makefile                          |   1 +
+ drivers/pwm/pwm-ingenic-x2000.c               | 155 ++++++++++++++++++
+ 7 files changed, 247 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/pwm/ingenic,x2000-pwm.yaml
+ create mode 100644 drivers/pwm/pwm-ingenic-x2000.c
+
+diff --git a/Documentation/devicetree/bindings/pwm/ingenic,x2000-pwm.yaml b/Documentation/devicetree/bindings/pwm/ingenic,x2000-pwm.yaml
+new file mode 100644
+index 000000000..0a24f3583
+--- /dev/null
++++ b/Documentation/devicetree/bindings/pwm/ingenic,x2000-pwm.yaml
+@@ -0,0 +1,47 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/pwm/ingenic,x2000-pwm.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Ingenic X2000 standalone PWM controller
++
++maintainers:
++  - linux-mips@vger.kernel.org
++
++description: |
++  Sixteen PWM channels with individual power-of-two prescalers and 16-bit
++  high/low counters. This block is separate from the older Ingenic TCU.
++
++allOf:
++  - $ref: pwm.yaml#
++
++properties:
++  compatible:
++    const: ingenic,x2000-pwm
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    maxItems: 1
++
++  "#pwm-cells":
++    const: 3
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - "#pwm-cells"
++
++additionalProperties: false
++
++examples:
++  - |
++    pwm@134c0000 {
++        compatible = "ingenic,x2000-pwm";
++        reg = <0x134c0000 0x400>;
++        clocks = <&pwm_clk>;
++        #pwm-cells = <3>;
++    };
+diff --git a/arch/mips/boot/dts/ingenic/shanling-q2.dts b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+index 08940c8c6..26e2bc890 100644
+--- a/arch/mips/boot/dts/ingenic/shanling-q2.dts
++++ b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+@@ -98,6 +98,13 @@ bldo2 {
+ 		};
+ 	};
+ 
++	backlight: backlight {
++		compatible = "pwm-backlight";
++		pwms = <&pwm 0 100000 0>;
++		brightness-levels = <0 16 32 64 96 128 160 192 224 255>;
++		default-brightness-level = <0>;
++	};
++
+ 	keys {
+ 		compatible = "gpio-keys";
+ 		label = "Q2 buttons";
+@@ -237,3 +244,19 @@ flash@0 {
+ 		/* Partition discovery remains external: do not guess device layout. */
+ 	};
+ };
++
++&pwm {
++	assigned-clocks = <&cgu X2000_CLK_PWM>;
++	assigned-clock-parents = <&cgu X2000_CLK_MPLL>;
++	assigned-clock-rates = <50000000>;
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&pwm0_pins>;
++};
++
++&pinctrl {
++	pwm0_pins: pwm0-pins {
++		function = "pwm0";
++		groups = "pwm0-c";
++	};
++};
+diff --git a/arch/mips/boot/dts/ingenic/x2000.dtsi b/arch/mips/boot/dts/ingenic/x2000.dtsi
+index 819e61fea..c834dd760 100644
+--- a/arch/mips/boot/dts/ingenic/x2000.dtsi
++++ b/arch/mips/boot/dts/ingenic/x2000.dtsi
+@@ -76,6 +76,14 @@ ccu: core-control@12200000 {
+ 		reg = <0x12200000 0x2000>;
+ 	};
+ 
++	pwm: pwm@134c0000 {
++		compatible = "ingenic,x2000-pwm";
++		reg = <0x134c0000 0x400>;
++		clocks = <&cgu X2000_CLK_PWM>;
++		#pwm-cells = <3>;
++		status = "disabled";
++	};
++
+ 	sfc: spi@13440000 {
+ 		compatible = "ingenic,x2000-sfc";
+ 		reg = <0x13440000 0x10000>;
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index 4605f41d2..9f66082e7 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -70,3 +70,7 @@ CONFIG_AXP20X_POWER=y
+ CONFIG_BATTERY_AXP20X=y
+ CONFIG_IIO=y
+ CONFIG_AXP20X_ADC=y
++CONFIG_PWM=y
++CONFIG_PWM_INGENIC_X2000=y
++CONFIG_BACKLIGHT_CLASS_DEVICE=y
++CONFIG_BACKLIGHT_PWM=y
+diff --git a/drivers/pwm/Kconfig b/drivers/pwm/Kconfig
+index 729776086..25cc6c522 100644
+--- a/drivers/pwm/Kconfig
++++ b/drivers/pwm/Kconfig
+@@ -369,6 +369,15 @@ config PWM_IQS620A
+ 	  To compile this driver as a module, choose M here: the module will
+ 	  be called pwm-iqs620a.
+ 
++config PWM_INGENIC_X2000
++	tristate "Ingenic X2000 standalone PWM support"
++	depends on MACH_INGENIC || COMPILE_TEST
++	depends on COMMON_CLK
++	help
++	  Drive the 16-channel standalone PWM controller in the X2000.
++	  This supports periodic waveforms such as the Q2 backlight;
++	  DMA waveform streaming is not implemented.
++
+ config PWM_JZ4740
+ 	tristate "Ingenic JZ47xx PWM support"
+ 	depends on MACH_INGENIC || COMPILE_TEST
+diff --git a/drivers/pwm/Makefile b/drivers/pwm/Makefile
+index 5630a521a..d1cdf4779 100644
+--- a/drivers/pwm/Makefile
++++ b/drivers/pwm/Makefile
+@@ -78,3 +78,4 @@ obj-$(CONFIG_PWM_TWL_LED)	+= pwm-twl-led.o
+ obj-$(CONFIG_PWM_VISCONTI)	+= pwm-visconti.o
+ obj-$(CONFIG_PWM_VT8500)	+= pwm-vt8500.o
+ obj-$(CONFIG_PWM_XILINX)	+= pwm-xilinx.o
++obj-$(CONFIG_PWM_INGENIC_X2000) += pwm-ingenic-x2000.o
+diff --git a/drivers/pwm/pwm-ingenic-x2000.c b/drivers/pwm/pwm-ingenic-x2000.c
+new file mode 100644
+index 000000000..7ab580f2d
+--- /dev/null
++++ b/drivers/pwm/pwm-ingenic-x2000.c
+@@ -0,0 +1,155 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * X2000 standalone PWM controller (not the older TCU PWM block).
++ * Register layout and prescaler from Ingenic's pwm-ingenic-v2.c by
++ * Sihui Liu <sihui.liu@ingenic.com>, Copyright 2015 Ingenic Semiconductor.
++ *
++ * Reconfiguration stops the channel and may truncate the current period.
++ * DMA waveform streaming is not supported.
++ */
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pwm.h>
++
++#define PWM_CCFG(n) (4 * ((n) / 8))
++#define PWM_ENS 0x10
++#define PWM_ENC 0x14
++#define PWM_EN 0x18
++#define PWM_UP 0x20
++#define PWM_BUSY 0x24
++#define PWM_INITR 0x30
++#define PWM_WCFG(n) (0xb0 + 4 * (n))
++#define PWM_DEC 0x104
++#define PWM_DCR0 0x110
++#define PWM_OEN 0x300
++
++struct x2000_pwm {
++	void __iomem *base;
++	unsigned long rate;
++};
++
++static void x2000_pwm_update(struct x2000_pwm *p, unsigned int reg,
++			     u32 mask, u32 value)
++{
++	writel((readl(p->base + reg) & ~mask) | value, p->base + reg);
++}
++
++static int x2000_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
++			   const struct pwm_state *state)
++{
++	struct x2000_pwm *p = pwmchip_get_drvdata(chip);
++	unsigned int n = pwm->hwpwm, shift = (n % 8) * 4, scale;
++	u64 period, duty;
++	u32 busy;
++	int ret;
++
++	if (state->polarity != PWM_POLARITY_NORMAL)
++		return -EINVAL;
++
++	if (!state->enabled) {
++		writel(BIT(n), p->base + PWM_ENC);
++		x2000_pwm_update(p, PWM_INITR, BIT(n) | BIT(n + 16), 0);
++		return 0;
++	}
++
++	/* Bound multiplication, and reject periods smaller than one clock. */
++	if (state->period > NSEC_PER_SEC)
++		return -ERANGE;
++	period = mul_u64_u32_div(state->period, p->rate, NSEC_PER_SEC);
++	duty = mul_u64_u32_div(state->duty_cycle, p->rate, NSEC_PER_SEC);
++	if (!period)
++		return -ERANGE;
++	for (scale = 0; period > 65535 && scale < 15; scale++) {
++		period >>= 1;
++		duty >>= 1;
++	}
++	if (period > 65535)
++		return -ERANGE;
++
++	ret = readl_poll_timeout(p->base + PWM_BUSY, busy,
++				!(busy & BIT(n)), 1, 10000);
++	if (ret)
++		return ret;
++	writel(BIT(n), p->base + PWM_ENC);
++	writel(BIT(n), p->base + PWM_DEC);
++	x2000_pwm_update(p, PWM_DCR0, BIT(n), 0);
++	x2000_pwm_update(p, PWM_CCFG(n), 0xf << shift, scale << shift);
++	x2000_pwm_update(p, PWM_INITR, BIT(n) | BIT(n + 16), 0);
++	writel((duty << 16) | (period - duty), p->base + PWM_WCFG(n));
++	x2000_pwm_update(p, PWM_OEN, BIT(n), BIT(n));
++	writel(BIT(n), p->base + PWM_UP);
++	writel(BIT(n), p->base + PWM_ENS);
++	return 0;
++}
++
++static int x2000_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
++			       struct pwm_state *state)
++{
++	struct x2000_pwm *p = pwmchip_get_drvdata(chip);
++	unsigned int n = pwm->hwpwm;
++	u32 wave = readl(p->base + PWM_WCFG(n));
++	u32 scale = (readl(p->base + PWM_CCFG(n)) >> ((n % 8) * 4)) & 0xf;
++	u64 high = wave >> 16, low = wave & 0xffff;
++
++	state->enabled = (readl(p->base + PWM_EN) & BIT(n)) &&
++			 (readl(p->base + PWM_OEN) & BIT(n));
++	state->polarity = PWM_POLARITY_NORMAL;
++	state->period = DIV_ROUND_UP_ULL(((high + low) << scale) * NSEC_PER_SEC,
++				       p->rate);
++	state->duty_cycle = DIV_ROUND_UP_ULL((high << scale) * NSEC_PER_SEC,
++					   p->rate);
++	return 0;
++}
++
++static const struct pwm_ops x2000_pwm_ops = {
++	.apply = x2000_pwm_apply,
++	.get_state = x2000_pwm_get_state,
++};
++
++static int x2000_pwm_probe(struct platform_device *pdev)
++{
++	struct pwm_chip *chip;
++	struct x2000_pwm *p;
++	struct clk *clk;
++	int ret;
++
++	chip = devm_pwmchip_alloc(&pdev->dev, 16, sizeof(*p));
++	if (IS_ERR(chip))
++		return PTR_ERR(chip);
++	p = pwmchip_get_drvdata(chip);
++	p->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(p->base))
++		return PTR_ERR(p->base);
++	clk = devm_clk_get_enabled(&pdev->dev, NULL);
++	if (IS_ERR(clk))
++		return dev_err_probe(&pdev->dev, PTR_ERR(clk), "PWM clock unavailable\n");
++	ret = devm_clk_rate_exclusive_get(&pdev->dev, clk);
++	if (ret)
++		return ret;
++	p->rate = clk_get_rate(clk);
++	if (!p->rate || p->rate > NSEC_PER_SEC)
++		return -EINVAL;
++	chip->ops = &x2000_pwm_ops;
++	return devm_pwmchip_add(&pdev->dev, chip);
++}
++
++static const struct of_device_id x2000_pwm_match[] = {
++	{ .compatible = "ingenic,x2000-pwm" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, x2000_pwm_match);
++
++static struct platform_driver x2000_pwm_driver = {
++	.probe = x2000_pwm_probe,
++	.driver = {
++		.name = "ingenic-x2000-pwm",
++		.of_match_table = x2000_pwm_match,
++	},
++};
++module_platform_driver(x2000_pwm_driver);
++MODULE_DESCRIPTION("Ingenic X2000 standalone PWM controller");
++MODULE_LICENSE("GPL");

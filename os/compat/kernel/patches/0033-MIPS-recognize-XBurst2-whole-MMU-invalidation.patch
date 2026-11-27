@@ -1,0 +1,27 @@
+From 56ac82165545a4f55d7be82f29fe8acc0535c711 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 00:05:47 -0500
+Subject: [PATCH] MIPS: recognize XBurst2 whole-MMU invalidation
+
+The XBurst2 core manual defines Config4.IE=3 as TLBINV/TLBINVF
+support across the entire MMU. Generic probing only recognizes IE=2.
+Enable the option for this CPU so initialization invalidates entries
+instead of assigning incompatible VPNs to indexed FTLB slots.
+---
+ arch/mips/kernel/cpu-probe.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/mips/kernel/cpu-probe.c b/arch/mips/kernel/cpu-probe.c
+index 489612ed9..29250a4af 100644
+--- a/arch/mips/kernel/cpu-probe.c
++++ b/arch/mips/kernel/cpu-probe.c
+@@ -1824,6 +1824,9 @@ static inline void cpu_probe_ingenic(struct cpuinfo_mips *c, unsigned int cpu)
+ 
+ 	/* XBurst®2 with MXU2.1 SIMD ISA */
+ 	case PRID_IMP_XBURST2:
++		/* XBurst2 Core PM: IE=3 invalidates the entire VTLB/FTLB. */
++		if (((read_c0_config4() & MIPS_CONF4_IE) >> 29) == 3)
++			c->options |= MIPS_CPU_TLBINV;
+ 		c->cputype = CPU_XBURST;
+ 		__cpu_name[cpu] = "Ingenic XBurst II";
+ 		break;

@@ -1,0 +1,67 @@
+From 89f8d15f2645bc61d3783ba7d37c0af86f2b589e Mon Sep 17 00:00:00 2001
+From: Q2 source preparation <noreply@localhost>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH] Add a live LPS slow transition parameter
+
+---
+ core/rtw_cmd.c          | 13 +++++++++++--
+ os_dep/linux/os_intfs.c |  8 ++++++++
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/core/rtw_cmd.c b/core/rtw_cmd.c
+index 4487f84..11049f5 100755
+--- a/core/rtw_cmd.c
++++ b/core/rtw_cmd.c
+@@ -2380,6 +2380,10 @@ u8 _lps_chk_by_tp(_adapter *adapter, u8 from_timer)
+ }
+ #endif
+ 
++#ifdef CONFIG_LPS_SLOW_TRANSITION
++extern int rtw_lps_slow_transition;
++#endif
++
+ static u8 _lps_chk_by_pkt_cnts(_adapter *padapter, u8 from_timer, u8 bBusyTraffic)
+ {		
+ 	struct mlme_priv *pmlmepriv = &(padapter->mlmepriv);
+@@ -2400,7 +2404,10 @@ static u8 _lps_chk_by_pkt_cnts(_adapter *padapter, u8 from_timer, u8 bBusyTraffi
+ 
+ 		bEnterPS = _FALSE;
+ 		#ifdef CONFIG_LPS_SLOW_TRANSITION
+-		if (bBusyTraffic == _TRUE) {
++		if (!READ_ONCE(rtw_lps_slow_transition)) {
++			/* Q2 power test: no re-entry count (thresholds unchanged). */
++			pmlmepriv->LinkDetectInfo.TrafficTransitionCount = 0;
++		} else if (bBusyTraffic == _TRUE) {
+ 			if (pmlmepriv->LinkDetectInfo.TrafficTransitionCount <= 4)
+ 				pmlmepriv->LinkDetectInfo.TrafficTransitionCount = 4;
+ 
+@@ -2419,7 +2426,9 @@ static u8 _lps_chk_by_pkt_cnts(_adapter *padapter, u8 from_timer, u8 bBusyTraffi
+ 		#endif
+ 
+ 		#ifdef CONFIG_LPS_SLOW_TRANSITION
+-		if (pmlmepriv->LinkDetectInfo.TrafficTransitionCount >= 2)
++		if (!READ_ONCE(rtw_lps_slow_transition))
++			pmlmepriv->LinkDetectInfo.TrafficTransitionCount = 0;
++		else if (pmlmepriv->LinkDetectInfo.TrafficTransitionCount >= 2)
+ 			pmlmepriv->LinkDetectInfo.TrafficTransitionCount -= 2;
+ 		else
+ 			pmlmepriv->LinkDetectInfo.TrafficTransitionCount = 0;
+diff --git a/os_dep/linux/os_intfs.c b/os_dep/linux/os_intfs.c
+index 1ba6814..488d121 100644
+--- a/os_dep/linux/os_intfs.c
++++ b/os_dep/linux/os_intfs.c
+@@ -126,6 +126,14 @@ MODULE_PARM_DESC(rtw_lps_1t1r, "The default LPS 1T1R setting");
+ 
+ module_param(rtw_lps_chk_by_tp, int, 0644);
+ 
++/* Q2 power test (R5): 1 keeps CONFIG_LPS_SLOW_TRANSITION's count, which holds
++ * the radio awake for several 2 s watchdog periods after busy traffic; 0
++ * enters LPS at the first quiet period. Read live by the traffic watchdog.
++ */
++int rtw_lps_slow_transition = 1;
++module_param(rtw_lps_slow_transition, int, 0644);
++MODULE_PARM_DESC(rtw_lps_slow_transition, "1: stock LPS re-entry count after busy traffic (default); 0: enter LPS at the first quiet watchdog period");
++
+ #ifdef CONFIG_WOWLAN
+ module_param(rtw_wow_ips_mode, int, 0644);
+ MODULE_PARM_DESC(rtw_wow_ips_mode, "The default WOW IPS mode");

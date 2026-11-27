@@ -1,0 +1,3 @@
+#!/bin/sh
+# The installed image has one immutable player owner, including service commands.
+exec /sbin/q2-installed-services "$@"

@@ -1,0 +1,37 @@
+From 4ec9f436bf2e7382fb5bb5233db444b46dd9109e Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 14:50:51 -0600
+Subject: [PATCH] Skip HALMAC message formatting when debug output is compiled
+ out
+
+_halmac_msg_print formatted every HALMAC trace with vsnprintf before
+discarding it: without CONFIG_RTW_DEBUG every RTW_* output macro is empty
+and DBG_MSG_FILTER is unset. HALMAC traces from per-frame paths; on the Q2
+the formatting was 16% of the driver transmit thread's cycles (perf,
+2026-11-18).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hal/hal_halmac.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/hal/hal_halmac.c b/hal/hal_halmac.c
+index ff55890..1da1085 100755
+--- a/hal/hal_halmac.c
++++ b/hal/hal_halmac.c
+@@ -520,6 +520,12 @@ static u8 _halmac_msg_print(void *p, u32 msg_type, u8 msg_level, s8 *fmt, ...)
+ 		return ret;
+ #endif
+ 
++#ifndef CONFIG_RTW_DEBUG
++	/* Every output below compiles to nothing without CONFIG_RTW_DEBUG;
++	 * HALMAC traces from per-frame paths, so do not format for nothing. */
++	return ret;
++#endif
++
+ 	str[0] = '\n';
+ 	va_start(args, fmt);
+ 	err = vsnprintf(str, MSG_LEN, fmt, args);
+-- 
+2.56.0
+

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Both the installed root and the kernel-resident rescue use the same policy.
+set -eu
+umask 077
+authorized=/root/.ssh/authorized_keys
+identity=/etc/q2-bootstrap/hostkey
+[ -f "$authorized" ] && [ ! -L "$authorized" ] && [ -s "$authorized" ] || exit 0
+[ -f "$identity" ] && [ ! -L "$identity" ] && [ -s "$identity" ] || exit 0
+exec /usr/sbin/dropbear -F -E -s -g -r "$identity" -p 192.168.77.2:22

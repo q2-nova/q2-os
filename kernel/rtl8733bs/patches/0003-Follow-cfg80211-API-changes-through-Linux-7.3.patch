@@ -1,0 +1,441 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 22:24:56 -0600
+Subject: [PATCH 3/3] Follow cfg80211 API changes through Linux 7.3
+
+The 6.9 channel-switch and 6.12 CAC helpers come from Stane1983's
+rtl8733BS-aml tree (github.com/Stane1983/rtl8733BS-aml), applied
+unchanged to this identical vendor release.
+
+Further changes, each checked against the tagged release's
+include/net/cfg80211.h, use thin forwarders so the vendor operations
+stay unchanged:
+- 6.13: set_monitor_channel receives the net_device.
+- 6.14: get_tx_power receives link_id.
+- 6.17: set_wiphy_params, set_tx_power and get_tx_power receive radio_idx.
+- 7.1: key and station operations, cfg80211_new_sta() and
+  cfg80211_del_sta() use the wireless_dev.
+- 7.3: remain_on_channel and mgmt_tx receive the cookie cfg80211
+  assigned; the driver reports that cookie instead of generating one.
+  rx_addr is only set for drivers advertising ROC_ADDR_FILTER.
+---
+ os_dep/linux/ioctl_cfg80211.c | 193 ++++++++++++++++++++++++++++++----
+ os_dep/linux/ioctl_cfg80211.h |  45 ++++++++
+ os_dep/linux/wifi_regd.c      |  14 +--
+ 3 files changed, 224 insertions(+), 28 deletions(-)
+
+diff --git a/os_dep/linux/ioctl_cfg80211.c b/os_dep/linux/ioctl_cfg80211.c
+index 4ba8558..3dfd078 100644
+--- a/os_dep/linux/ioctl_cfg80211.c
++++ b/os_dep/linux/ioctl_cfg80211.c
+@@ -204,7 +204,7 @@ u8 rtw_cfg80211_ch_switch_notify(_adapter *adapter, u8 ch, u8 bw, u8 offset,
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0))
+ 	if (started) {
+-		cfg80211_ch_switch_started_notify(adapter->pnetdev, &chdef, 0, 0, false, punct_bitmap);
++		rtw_cfg80211_ch_switch_started_notify_compat(adapter->pnetdev, &chdef, 0, 0, false, punct_bitmap);
+ 
+ 		/* --- cfg80211_ch_switch_started_notfiy() ---
+ 		 *  A new parameter, bool quiet, is added from Linux kernel v5.11,
+@@ -220,7 +220,7 @@ u8 rtw_cfg80211_ch_switch_notify(_adapter *adapter, u8 ch, u8 bw, u8 offset,
+ 	if (!rtw_cfg80211_allow_ch_switch_notify(adapter))
+ 		goto exit;
+ 
+-	cfg80211_ch_switch_notify(adapter->pnetdev, &chdef, 0, punct_bitmap);
++	rtw_cfg80211_ch_switch_notify_compat(adapter->pnetdev, &chdef, 0, punct_bitmap);
+ 
+ #else
+ 	int freq = rtw_ch2freq(ch);
+@@ -5065,7 +5065,7 @@ void rtw_cfg80211_indicate_sta_assoc(_adapter *padapter, u8 *pmgmt_frame, uint f
+ 		sinfo->filled = STATION_INFO_ASSOC_REQ_IES;
+ 		sinfo->assoc_req_ies = pmgmt_frame + WLAN_HDR_A3_LEN + ie_offset;
+ 		sinfo->assoc_req_ies_len = frame_len - WLAN_HDR_A3_LEN - ie_offset;
+-		cfg80211_new_sta(ndev, get_addr2_ptr(pmgmt_frame), sinfo, GFP_ATOMIC);
++		cfg80211_new_sta(rtw_cfg80211_sta_dev(ndev), get_addr2_ptr(pmgmt_frame), sinfo, GFP_ATOMIC);
+ 		rtw_mfree(sinfo, sizeof(struct station_info));
+ 	}
+ #else /* defined(RTW_USE_CFG80211_STA_EVENT) */
+@@ -5112,7 +5112,7 @@ void rtw_cfg80211_indicate_sta_disassoc(_adapter *padapter, const u8 *da, unsign
+ 	RTW_INFO(FUNC_ADPT_FMT"\n", FUNC_ADPT_ARG(padapter));
+ 
+ #if defined(RTW_USE_CFG80211_STA_EVENT) || defined(COMPAT_KERNEL_RELEASE)
+-	cfg80211_del_sta(ndev, da, GFP_ATOMIC);
++	cfg80211_del_sta(rtw_cfg80211_sta_dev(ndev), da, GFP_ATOMIC);
+ #else /* defined(RTW_USE_CFG80211_STA_EVENT) */
+ 	channel = pmlmeext->cur_channel;
+ 	freq = rtw_ch2freq(channel);
+@@ -5808,7 +5808,7 @@ release_plink_ctl:
+ 				goto exit;
+ 			}
+ 			/* indicate new sta */
+-			cfg80211_new_sta(ndev, mac, sinfo, GFP_ATOMIC);
++			cfg80211_new_sta(rtw_cfg80211_sta_dev(ndev), mac, sinfo, GFP_ATOMIC);
+ 			rtw_mfree(sinfo, sizeof(struct station_info));
+ 		}
+ 		goto exit;
+@@ -7597,7 +7597,9 @@ static s32 cfg80211_rtw_remain_on_channel(struct wiphy *wiphy,
+ #endif
+ #endif
+ 
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0))
+ 	*cookie = ATOMIC_INC_RETURN(&prochinfo->ro_ch_cookie_gen);
++#endif /* Linux 7.3 assigns the cookie before calling the driver. */
+ 
+ 	RTW_INFO(FUNC_ADPT_FMT"%s ch:%u duration:%d, cookie:0x%llx\n"
+ 		, FUNC_ADPT_ARG(padapter), wdev == wiphy_to_pd_wdev(wiphy) ? " PD" : ""
+@@ -8224,8 +8226,10 @@ static int cfg80211_rtw_mgmt_tx(struct wiphy *wiphy,
+ 	dvobj = adapter_to_dvobj(padapter);
+ 	pwdev_priv = adapter_wdev_data(padapter);
+ 
+-	/* cookie generation */
++	/* cookie generation; Linux 7.3 assigns it before calling the driver */
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0))
+ 	*cookie = pwdev_priv->mgmt_tx_cookie++;
++#endif
+ 
+ #ifdef CONFIG_DEBUG_CFG80211
+ 	RTW_INFO(FUNC_ADPT_FMT"%s len=%zu, ch=%d"
+@@ -10629,31 +10633,178 @@ static int cfg80211_rtw_channel_switch(struct wiphy *wiphy,
+ #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 12, 0)) */
+ #endif /* CONFIG_AP_MODE */
+ 
++/*
++ * cfg80211_ops signature changes after the vendor's last supported kernel,
++ * each checked against the tagged release's include/net/cfg80211.h:
++ *   6.13 set_monitor_channel gains the net_device
++ *   6.14 get_tx_power gains link_id
++ *   6.17 set_wiphy_params, set_tx_power and get_tx_power gain radio_idx
++ *   7.1  key and station operations take the wireless_dev
++ *   7.3  remain_on_channel and mgmt_tx receive the cookie cfg80211 assigned
++ * Thin forwarders keep the vendor implementations unchanged.
++ */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
++#define RTW_CFG80211_WDEV_OP(fn) fn##_wdev
++static int cfg80211_rtw_add_key_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, int link_id, u8 key_index, bool pairwise,
++	const u8 *mac_addr, struct key_params *params)
++{
++	return cfg80211_rtw_add_key(wiphy, wdev->netdev, link_id, key_index,
++				    pairwise, mac_addr, params);
++}
++
++static int cfg80211_rtw_get_key_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, int link_id, u8 key_index, bool pairwise,
++	const u8 *mac_addr, void *cookie,
++	void (*callback)(void *cookie, struct key_params *))
++{
++	return cfg80211_rtw_get_key(wiphy, wdev->netdev, link_id, key_index,
++				    pairwise, mac_addr, cookie, callback);
++}
++
++static int cfg80211_rtw_del_key_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, int link_id, u8 key_index, bool pairwise,
++	const u8 *mac_addr)
++{
++	return cfg80211_rtw_del_key(wiphy, wdev->netdev, link_id, key_index,
++				    pairwise, mac_addr);
++}
++
++static int cfg80211_rtw_set_default_mgmt_key_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, int link_id, u8 key_index)
++{
++	return cfg80211_rtw_set_default_mgmt_key(wiphy, wdev->netdev, link_id,
++						 key_index);
++}
++
++static int cfg80211_rtw_get_station_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, const u8 *mac, struct station_info *sinfo)
++{
++	return cfg80211_rtw_get_station(wiphy, wdev->netdev, mac, sinfo);
++}
++
++#ifdef CONFIG_AP_MODE
++static int cfg80211_rtw_add_station_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, const u8 *mac,
++	struct station_parameters *params)
++{
++	return cfg80211_rtw_add_station(wiphy, wdev->netdev, mac, params);
++}
++
++static int cfg80211_rtw_del_station_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, struct station_del_parameters *params)
++{
++	return cfg80211_rtw_del_station(wiphy, wdev->netdev, params);
++}
++
++static int cfg80211_rtw_change_station_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, const u8 *mac,
++	struct station_parameters *params)
++{
++	return cfg80211_rtw_change_station(wiphy, wdev->netdev, mac, params);
++}
++
++static int cfg80211_rtw_dump_station_wdev(struct wiphy *wiphy,
++	struct wireless_dev *wdev, int idx, u8 *mac, struct station_info *sinfo)
++{
++	return cfg80211_rtw_dump_station(wiphy, wdev->netdev, idx, mac, sinfo);
++}
++#endif /* CONFIG_AP_MODE */
++#else
++#define RTW_CFG80211_WDEV_OP(fn) fn
++#endif
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0))
++#define RTW_CFG80211_RADIO_OP(fn) fn##_radio
++static int cfg80211_rtw_set_wiphy_params_radio(struct wiphy *wiphy,
++	int radio_idx, u32 changed)
++{
++	return cfg80211_rtw_set_wiphy_params(wiphy, changed);
++}
++
++static int cfg80211_rtw_set_txpower_radio(struct wiphy *wiphy,
++	struct wireless_dev *wdev, int radio_idx,
++	enum nl80211_tx_power_setting type, int mbm)
++{
++	return cfg80211_rtw_set_txpower(wiphy, wdev, type, mbm);
++}
++
++static int cfg80211_rtw_get_txpower_radio(struct wiphy *wiphy,
++	struct wireless_dev *wdev, int radio_idx, unsigned int link_id, int *dbm)
++{
++	return cfg80211_rtw_get_txpower(wiphy, wdev, dbm);
++}
++#define RTW_CFG80211_GET_TXPOWER cfg80211_rtw_get_txpower_radio
++#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0))
++#define RTW_CFG80211_RADIO_OP(fn) fn
++static int cfg80211_rtw_get_txpower_link(struct wiphy *wiphy,
++	struct wireless_dev *wdev, unsigned int link_id, int *dbm)
++{
++	return cfg80211_rtw_get_txpower(wiphy, wdev, dbm);
++}
++#define RTW_CFG80211_GET_TXPOWER cfg80211_rtw_get_txpower_link
++#else
++#define RTW_CFG80211_RADIO_OP(fn) fn
++#define RTW_CFG80211_GET_TXPOWER cfg80211_rtw_get_txpower
++#endif
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0))
++static int cfg80211_rtw_set_monitor_channel_dev(struct wiphy *wiphy,
++	struct net_device *dev, struct cfg80211_chan_def *chandef)
++{
++	return cfg80211_rtw_set_monitor_channel(wiphy, chandef);
++}
++#define RTW_CFG80211_SET_MONITOR_CHANNEL cfg80211_rtw_set_monitor_channel_dev
++#else
++#define RTW_CFG80211_SET_MONITOR_CHANNEL cfg80211_rtw_set_monitor_channel
++#endif
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
++#define RTW_CFG80211_COOKIE_OP(fn) fn##_cookie
++/* rx_addr is only passed when NL80211_EXT_FEATURE_ROC_ADDR_FILTER is set. */
++static int cfg80211_rtw_remain_on_channel_cookie(struct wiphy *wiphy,
++	struct wireless_dev *wdev, struct ieee80211_channel *channel,
++	unsigned int duration, u64 cookie, const u8 *rx_addr)
++{
++	return cfg80211_rtw_remain_on_channel(wiphy, wdev, channel, duration,
++					      &cookie);
++}
++
++static int cfg80211_rtw_mgmt_tx_cookie(struct wiphy *wiphy,
++	struct wireless_dev *wdev, struct cfg80211_mgmt_tx_params *params,
++	u64 cookie)
++{
++	return cfg80211_rtw_mgmt_tx(wiphy, wdev, params, &cookie);
++}
++#else
++#define RTW_CFG80211_COOKIE_OP(fn) fn
++#endif
++
+ static struct cfg80211_ops rtw_cfg80211_ops = {
+ 	.change_virtual_intf = cfg80211_rtw_change_iface,
+-	.add_key = cfg80211_rtw_add_key,
+-	.get_key = cfg80211_rtw_get_key,
+-	.del_key = cfg80211_rtw_del_key,
++	.add_key = RTW_CFG80211_WDEV_OP(cfg80211_rtw_add_key),
++	.get_key = RTW_CFG80211_WDEV_OP(cfg80211_rtw_get_key),
++	.del_key = RTW_CFG80211_WDEV_OP(cfg80211_rtw_del_key),
+ 	.set_default_key = cfg80211_rtw_set_default_key,
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 30))
+-	.set_default_mgmt_key = cfg80211_rtw_set_default_mgmt_key,
++	.set_default_mgmt_key = RTW_CFG80211_WDEV_OP(cfg80211_rtw_set_default_mgmt_key),
+ #endif
+ #if defined(CONFIG_GTK_OL) && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 1, 0))
+ 	.set_rekey_data = cfg80211_rtw_set_rekey_data,
+ #endif /*CONFIG_GTK_OL*/
+-	.get_station = cfg80211_rtw_get_station,
++	.get_station = RTW_CFG80211_WDEV_OP(cfg80211_rtw_get_station),
+ 	.scan = cfg80211_rtw_scan,
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
+ 	.abort_scan = cfg80211_rtw_abort_scan,
+ #endif
+-	.set_wiphy_params = cfg80211_rtw_set_wiphy_params,
++	.set_wiphy_params = RTW_CFG80211_RADIO_OP(cfg80211_rtw_set_wiphy_params),
+ 	.connect = cfg80211_rtw_connect,
+ 	.disconnect = cfg80211_rtw_disconnect,
+ 	.join_ibss = cfg80211_rtw_join_ibss,
+ 	.leave_ibss = cfg80211_rtw_leave_ibss,
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 31))
+-	.set_tx_power = cfg80211_rtw_set_txpower,
+-	.get_tx_power = cfg80211_rtw_get_txpower,
++	.set_tx_power = RTW_CFG80211_RADIO_OP(cfg80211_rtw_set_txpower),
++	.get_tx_power = RTW_CFG80211_GET_TXPOWER,
+ #endif
+ 	.set_power_mgmt = cfg80211_rtw_set_power_mgmt,
+ 	.set_pmksa = cfg80211_rtw_set_pmksa,
+@@ -10678,10 +10829,10 @@ static struct cfg80211_ops rtw_cfg80211_ops = {
+ 	.set_mac_acl = cfg80211_rtw_set_mac_acl,
+ #endif
+ 
+-	.add_station = cfg80211_rtw_add_station,
+-	.del_station = cfg80211_rtw_del_station,
+-	.change_station = cfg80211_rtw_change_station,
+-	.dump_station = cfg80211_rtw_dump_station,
++	.add_station = RTW_CFG80211_WDEV_OP(cfg80211_rtw_add_station),
++	.del_station = RTW_CFG80211_WDEV_OP(cfg80211_rtw_del_station),
++	.change_station = RTW_CFG80211_WDEV_OP(cfg80211_rtw_change_station),
++	.dump_station = RTW_CFG80211_WDEV_OP(cfg80211_rtw_dump_station),
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28))
+ 	.change_bss = cfg80211_rtw_change_bss,
+ #endif
+@@ -10712,13 +10863,13 @@ static struct cfg80211_ops rtw_cfg80211_ops = {
+ #endif
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0))
+-	.set_monitor_channel = cfg80211_rtw_set_monitor_channel,
++	.set_monitor_channel = RTW_CFG80211_SET_MONITOR_CHANNEL,
+ #endif
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0))
+ 	.get_channel = cfg80211_rtw_get_channel,
+ #endif
+ 
+-	.remain_on_channel = cfg80211_rtw_remain_on_channel,
++	.remain_on_channel = RTW_CFG80211_COOKIE_OP(cfg80211_rtw_remain_on_channel),
+ 	.cancel_remain_on_channel = cfg80211_rtw_cancel_remain_on_channel,
+ 
+ #if defined(CONFIG_P2P) && defined(RTW_DEDICATED_P2P_DEVICE)
+@@ -10731,7 +10882,7 @@ static struct cfg80211_ops rtw_cfg80211_ops = {
+ #endif
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)) || defined(COMPAT_KERNEL_RELEASE)
+-	.mgmt_tx = cfg80211_rtw_mgmt_tx,
++	.mgmt_tx = RTW_CFG80211_COOKIE_OP(cfg80211_rtw_mgmt_tx),
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0))
+ 	.mgmt_frame_register = cfg80211_rtw_mgmt_frame_register,
+ #else
+diff --git a/os_dep/linux/ioctl_cfg80211.h b/os_dep/linux/ioctl_cfg80211.h
+index 8f56e31..6965e3a 100755
+--- a/os_dep/linux/ioctl_cfg80211.h
++++ b/os_dep/linux/ioctl_cfg80211.h
+@@ -76,6 +76,51 @@
+ #error "CONFIG_RTW_CFG80211_CAC_EVENT is not supported when enable RTW_PER_ADAPTER_WIPHY"
+ #endif
+ 
++/*
++ * cfg80211 API compatibility helpers
++ *
++ * - Linux v6.9 removed the punct_bitmap argument of
++ *   cfg80211_ch_switch_notify() and cfg80211_ch_switch_started_notify().
++ * - Linux v6.12 moved the DFS/CAC state of struct wireless_dev into
++ *   links[] and added a link_id argument to cfg80211_cac_event().
++ *
++ * Kernels older than v6.9 keep using the exact calls the driver used before.
++ */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0))
++#define rtw_cfg80211_ch_switch_notify_compat(dev, chdef, link_id, punct_bitmap) \
++	do { \
++		(void)(punct_bitmap); \
++		cfg80211_ch_switch_notify(dev, chdef, link_id); \
++	} while (0)
++#define rtw_cfg80211_ch_switch_started_notify_compat(dev, chdef, link_id, count, quiet, punct_bitmap) \
++	do { \
++		(void)(punct_bitmap); \
++		cfg80211_ch_switch_started_notify(dev, chdef, link_id, count, quiet); \
++	} while (0)
++#else
++#define rtw_cfg80211_ch_switch_notify_compat(dev, chdef, link_id, punct_bitmap) \
++	cfg80211_ch_switch_notify(dev, chdef, link_id, punct_bitmap)
++#define rtw_cfg80211_ch_switch_started_notify_compat(dev, chdef, link_id, count, quiet, punct_bitmap) \
++	cfg80211_ch_switch_started_notify(dev, chdef, link_id, count, quiet, punct_bitmap)
++#endif
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++#define rtw_wdev_cac_started(wdev) ((wdev)->links[0].cac_started)
++#define rtw_cfg80211_cac_event_compat(netdev, chdef, event, gfp) \
++	cfg80211_cac_event(netdev, chdef, event, gfp, 0)
++#else
++#define rtw_wdev_cac_started(wdev) ((wdev)->cac_started)
++#define rtw_cfg80211_cac_event_compat(netdev, chdef, event, gfp) \
++	cfg80211_cac_event(netdev, chdef, event, gfp)
++#endif
++
++/* Linux v7.1: cfg80211_new_sta() and cfg80211_del_sta() take the wireless_dev. */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0))
++#define rtw_cfg80211_sta_dev(ndev) ((ndev)->ieee80211_ptr)
++#else
++#define rtw_cfg80211_sta_dev(ndev) (ndev)
++#endif
++
+ #if !defined(CONFIG_P2P) && RTW_P2P_GROUP_INTERFACE
+ 	#error "RTW_P2P_GROUP_INTERFACE can't be enabled when CONFIG_P2P is disabled\n"
+ #endif
+diff --git a/os_dep/linux/wifi_regd.c b/os_dep/linux/wifi_regd.c
+index bc27baf..43a5076 100644
+--- a/os_dep/linux/wifi_regd.c
++++ b/os_dep/linux/wifi_regd.c
+@@ -154,7 +154,7 @@ static void rtw_regd_schedule_dfs_chan_update(struct wiphy *wiphy)
+ 			return;
+ 		rtw_regd_set_du_chdef(wiphy);
+ 	}
+-	cfg80211_ch_switch_notify(wiphy_data->du_wdev->netdev, &wiphy_data->du_chdef, 0, 0);
++	rtw_cfg80211_ch_switch_notify_compat(wiphy_data->du_wdev->netdev, &wiphy_data->du_chdef, 0, 0);
+ }
+ 
+ static void rtw_regd_override_dfs_state(struct wiphy *wiphy, struct get_chplan_resp *chplan, bool non_ocp_only)
+@@ -989,7 +989,7 @@ static void async_cac_change_work_hdl(_workitem *work)
+ 		evt = LIST_CONTAINOR(list, struct async_cac_change_evt, list);
+ 
+ 		rtnl_lock();
+-		cfg80211_cac_event(evt->netdev, &evt->chandef, evt->event, GFP_KERNEL);
++		rtw_cfg80211_cac_event_compat(evt->netdev, &evt->chandef, evt->event, GFP_KERNEL);
+ 		rtnl_unlock();
+ 
+ 		rtw_mfree(evt, sizeof(*evt));
+@@ -1077,7 +1077,7 @@ static void rtw_cfg80211_cac_event(struct rf_ctl_t *rfctl, u8 band_idx
+ 		if (async)
+ 			cfg80211_cac_event_async(iface->pnetdev, &chdef, event);
+ 		else
+-			cfg80211_cac_event(iface->pnetdev, &chdef, event, GFP_KERNEL);
++			rtw_cfg80211_cac_event_compat(iface->pnetdev, &chdef, event, GFP_KERNEL);
+ 	}
+ }
+ 
+@@ -1115,7 +1115,7 @@ void rtw_cfg80211_cac_finished_event(struct rf_ctl_t *rfctl, u8 band_idx
+ 		if (!iface || !(ifbmp & BIT(iface->iface_id)))
+ 			continue;
+ 		/* finish only for wdev with cac_started */
+-		if (!iface->rtw_wdev || !iface->rtw_wdev->cac_started)
++		if (!iface->rtw_wdev || !rtw_wdev_cac_started(iface->rtw_wdev))
+ 			ifbmp &= ~BIT(iface->iface_id);
+ 	}
+ 
+@@ -1138,7 +1138,7 @@ void rtw_cfg80211_cac_aborted_event(struct rf_ctl_t *rfctl, u8 band_idx
+ 		if (!iface || !(ifbmp & BIT(iface->iface_id)))
+ 			continue;
+ 		/* abort only for wdev with cac_started */
+-		if (!iface->rtw_wdev || !iface->rtw_wdev->cac_started)
++		if (!iface->rtw_wdev || !rtw_wdev_cac_started(iface->rtw_wdev))
+ 			ifbmp &= ~BIT(iface->iface_id);
+ 	}
+ 
+@@ -1225,9 +1225,9 @@ void rtw_cfg80211_cac_force_finished(struct rf_ctl_t *rfctl, u8 band_idx
+ 			started_ifbmp &= ~BIT(iface->iface_id);
+ 			continue;
+ 		}
+-		if (need_start && iface->rtw_wdev->cac_started)
++		if (need_start && rtw_wdev_cac_started(iface->rtw_wdev))
+ 			started_ifbmp &= ~BIT(iface->iface_id);
+-		else if (!need_start && !iface->rtw_wdev->cac_started)
++		else if (!need_start && !rtw_wdev_cac_started(iface->rtw_wdev))
+ 			finished_ifbmp &= ~BIT(iface->iface_id);
+ 	}
+ 

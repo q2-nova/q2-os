@@ -1,0 +1,13 @@
+# Generated development fixture. No owner credentials or external services.
+[server]
+url = "http://10.0.2.100:8080"
+user = "q2-fixture"
+password = "synthetic-test-only"
+[wifi]
+enabled = false
+[display]
+timezone = "UTC"
+[storage]
+stream_cache_mb = 32
+reserve_mb = 16
+prefetch_songs = 0

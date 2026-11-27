@@ -1,0 +1,172 @@
+From 5746a75ea0d9a79a7cfd26f2b6ff834c4432849f Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:40:09 -0500
+Subject: [PATCH 6/7] mmc: add X2000 SDHCI glue for the Shanling Q2
+
+Use the Q2 soc_msc.ko capability override (0x276dc898), inverted WP and
+DMA quirks. Adapt the clock/host approach from the Ingenic SDHCI driver
+by Large Dipper <wangquan.shao@ingenic.cn>, as published in
+Ingenic-community/linux at 91fe78280ac7dd0dae0f58cb271e821bd39ba97e.
+Use the Linux 7.3 capability override API and managed allocation.
+
+Switch the gated CGU parent for identification and update the SDHCI
+divider from the actual CGU rate. UHS tuning is deliberately deferred.
+Verified in QEMU with ADMA 64 KiB reads and writes against known bytes;
+physical signal timing and suspend remain unvalidated.
+---
+ drivers/mmc/host/Kconfig               |   8 ++
+ drivers/mmc/host/Makefile              |   2 +
+ drivers/mmc/host/sdhci-ingenic-x2000.c | 115 +++++++++++++++++++++++++
+ 3 files changed, 125 insertions(+)
+ create mode 100644 drivers/mmc/host/sdhci-ingenic-x2000.c
+
+diff --git a/drivers/mmc/host/Kconfig b/drivers/mmc/host/Kconfig
+index 4f060d3e5..eb2516e83 100644
+--- a/drivers/mmc/host/Kconfig
++++ b/drivers/mmc/host/Kconfig
+@@ -160,6 +160,14 @@ config MMC_SDHCI_PLTFM
+ 
+ 	  If unsure, say N.
+ 
++config MMC_SDHCI_INGENIC
++	tristate "Ingenic X2000 SDHCI support"
++	depends on MMC_SDHCI_PLTFM
++	depends on MACH_INGENIC || COMPILE_TEST
++	help
++	  Support the SDHCI-compatible MSC controllers in Ingenic X2000 SoCs.
++	  UHS phase tuning is not supported yet.
++
+ config MMC_SDHCI_OF_ARASAN
+ 	tristate "SDHCI OF support for the Arasan SDHCI controllers"
+ 	depends on MMC_SDHCI_PLTFM
+diff --git a/drivers/mmc/host/Makefile b/drivers/mmc/host/Makefile
+index ee412e6b8..bdcb3d542 100644
+--- a/drivers/mmc/host/Makefile
++++ b/drivers/mmc/host/Makefile
+@@ -115,3 +115,5 @@ endif
+ 
+ obj-$(CONFIG_MMC_SDHCI_XENON)	+= sdhci-xenon-driver.o
+ sdhci-xenon-driver-y		+= sdhci-xenon.o sdhci-xenon-phy.o
++
++obj-$(CONFIG_MMC_SDHCI_INGENIC) += sdhci-ingenic-x2000.o
+diff --git a/drivers/mmc/host/sdhci-ingenic-x2000.c b/drivers/mmc/host/sdhci-ingenic-x2000.c
+new file mode 100644
+index 000000000..7665e2a03
+--- /dev/null
++++ b/drivers/mmc/host/sdhci-ingenic-x2000.c
+@@ -0,0 +1,115 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * X2000 MSC SDHCI glue. Register capabilities and quirks follow the Q2
++ * soc_msc.ko and the Ingenic driver by Large Dipper
++ * <wangquan.shao@ingenic.cn> in Ingenic-community/linux.
++ *
++ * The CGU supplies the card clock. Use EXCLK for card identification and
++ * the boot PLL parent above 400 kHz; keep the SDHCI divider consistent
++ * with the actual CGU rate. UHS phase tuning is intentionally not enabled.
++ */
++#include <linux/module.h>
++#include <linux/of.h>
++
++#include "sdhci-pltfm.h"
++
++struct x2000_msc {
++	struct clk *ext;
++	struct clk *pll;
++};
++
++static void x2000_msc_set_clock(struct sdhci_host *host, unsigned int clock)
++{
++	struct sdhci_pltfm_host *pltfm = sdhci_priv(host);
++	struct x2000_msc *msc = sdhci_pltfm_priv(pltfm);
++	int ret, enable_ret;
++
++	sdhci_writew(host, 0, SDHCI_CLOCK_CONTROL);
++	host->mmc->actual_clock = 0;
++	if (!clock)
++		return;
++
++	clk_disable_unprepare(pltfm->clk);
++	ret = clk_set_parent(pltfm->clk, clock <= 400000 ? msc->ext : msc->pll);
++	if (!ret)
++		ret = clk_set_rate(pltfm->clk, clock);
++	enable_ret = clk_prepare_enable(pltfm->clk);
++	if (!ret)
++		ret = enable_ret;
++	if (ret) {
++		dev_err(mmc_dev(host->mmc), "cannot set MSC clock to %u: %d\n", clock, ret);
++		return;
++	}
++	host->max_clk = clk_get_rate(pltfm->clk);
++	sdhci_set_clock(host, clock);
++}
++
++static const struct sdhci_ops x2000_msc_ops = {
++	.set_clock = x2000_msc_set_clock,
++	.get_max_clock = sdhci_pltfm_clk_get_max_clock,
++	.set_bus_width = sdhci_set_bus_width,
++	.reset = sdhci_reset,
++	.set_uhs_signaling = sdhci_set_uhs_signaling,
++};
++
++static const struct sdhci_pltfm_data x2000_msc_data = {
++	.ops = &x2000_msc_ops,
++	.quirks = SDHCI_QUIRK_INVERTED_WRITE_PROTECT |
++		  SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC |
++		  SDHCI_QUIRK_NO_HISPD_BIT |
++		  SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
++		  SDHCI_QUIRK_32BIT_DMA_ADDR | SDHCI_QUIRK_32BIT_DMA_SIZE,
++};
++
++static int x2000_msc_probe(struct platform_device *pdev)
++{
++	struct sdhci_pltfm_host *pltfm;
++	struct x2000_msc *msc;
++	struct sdhci_host *host;
++	u32 caps = 0x276dc898, caps1 = 0;
++	int ret;
++
++	host = sdhci_pltfm_init(pdev, &x2000_msc_data, sizeof(*msc));
++	if (IS_ERR(host))
++		return PTR_ERR(host);
++	pltfm = sdhci_priv(host);
++	msc = sdhci_pltfm_priv(pltfm);
++	msc->ext = devm_clk_get_enabled(&pdev->dev, "ext");
++	if (IS_ERR(msc->ext))
++		return dev_err_probe(&pdev->dev, PTR_ERR(msc->ext), "EXCLK unavailable\n");
++	pltfm->clk = devm_clk_get_enabled(&pdev->dev, "sdhci");
++	if (IS_ERR(pltfm->clk))
++		return dev_err_probe(&pdev->dev, PTR_ERR(pltfm->clk), "MSC clock unavailable\n");
++	msc->pll = clk_get_parent(pltfm->clk);
++	if (!msc->pll)
++		return -EINVAL;
++
++	/* soc_msc.ko, sdhci_ingenic_probe +0x520: software capability override. */
++	__sdhci_read_caps(host, NULL, &caps, &caps1);
++	ret = mmc_of_parse(host->mmc);
++	if (ret)
++		return ret;
++	sdhci_get_property(pdev);
++
++	return sdhci_add_host(host);
++}
++
++static const struct of_device_id x2000_msc_match[] = {
++	{ .compatible = "ingenic,x2000-sdhci" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, x2000_msc_match);
++
++static struct platform_driver x2000_msc_driver = {
++	.probe = x2000_msc_probe,
++	.remove = sdhci_pltfm_remove,
++	.driver = {
++		.name = "sdhci-ingenic-x2000",
++		.of_match_table = x2000_msc_match,
++		.pm = &sdhci_pltfm_pmops,
++	},
++};
++module_platform_driver(x2000_msc_driver);
++
++MODULE_DESCRIPTION("Ingenic X2000 MSC SDHCI driver");
++MODULE_LICENSE("GPL");

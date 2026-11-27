@@ -1,0 +1,150 @@
+#!/bin/sh
+# Automatic USB host handoff. Physical VBUS, not our own UDC rebind, resets latch.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RUN=/run/q2
+SYS=/sys
+PROC=/proc
+STORAGE=/sbin/q2-usb-storage
+SELF=/usr/sbin/q2-usb-auto
+EVENTS=/usr/sbin/q2-usb-auto-events
+LOG=/run/log/usb-auto
+umask 077
+fail() { echo "q2-usb-auto: $*" >&2; exit 1; }
+note() { echo "q2-usb-auto: $*"; }
+host_configured() {
+    for state in "$SYS"/class/udc/*/state; do
+        [ -r "$state" ] || continue
+        [ "$(cat "$state")" != configured ] || return 0
+    done
+    return 1
+}
+step() {
+    online=$(cat "$SYS/class/power_supply/axp20x-usb/online" 2>/dev/null || :)
+    phase=$(cat "$RUN/usb-storage/phase" 2>/dev/null || :)
+    # One PMIC sample or a UDC disconnect is insufficient. The ownership
+    # helper debounces physical absence under its lock and rechecks on return.
+    unplugged=0
+    # With neither a session nor an attachment latch, there is no ownership
+    # transition or latch reset to perform. Do not contend with Sleep for the
+    # global storage lock just to reconfirm an already idle battery state.
+    if [ "$online" = 0 ] && { [ -n "$phase" ] || [ -e "$RUN/usb-auto.used" ]; } && "$STORAGE" disconnected; then
+        unplugged=1
+        rm -f "$RUN/usb-auto.used"
+    fi
+    if [ "$online" = 1 ] && [ -n "$phase" ]; then : > "$RUN/usb-auto.used"; fi
+    # Existing menu/manual sessions return after eject OR confirmed unplug.
+    # Autostart preferences only gate a NEW export below.
+    if [ "$phase" = armed ] || [ "$phase" = exported ]; then
+        gadget=$(cat "$RUN/usb-storage/gadget" 2>/dev/null || :)
+        case "$gadget" in "$SYS/kernel/config/usb_gadget/q2diag"|"$SYS/kernel/config/usb_gadget/q2net") ;;
+            *) note 'unrecognized USB session gadget; leaving ownership unchanged'; return 0 ;;
+        esac
+        lun=$gadget/functions/mass_storage.q2card/lun.0/file
+        [ -e "$lun" ] || return 0
+        backing=$(cat "$lun")
+        if [ -z "$backing" ] || [ "$unplugged" = 1 ]; then
+            # Only the storage helper can reclaim/remount; never clear backing.
+            [ ! -e "$RUN/usb-storage.lock" ] || return 0
+            [ ! -e "$RUN/usb-auto.return-attempted" ] || return 0
+            : > "$RUN/usb-auto.return-attempted"
+            if "$STORAGE" stop; then
+                rm -f "$RUN/usb-auto.return-attempted"
+            else
+                result=$?
+                if [ "$result" = 75 ]; then
+                    # A debounce/reconnect or ownership-lock race is retryable.
+                    rm -f "$RUN/usb-auto.return-attempted"
+                else
+                    note 'return failed; mode screen and manual recovery remain available'
+                fi
+            fi
+        fi
+        return 0
+    fi
+    [ -z "$phase" ] || return 0
+    rm -f "$RUN/usb-auto.return-attempted"
+    [ ! -e "$RUN/usb-auto.inhibit" ] || return 0
+    grep -Fqw q2.usb-auto=off "$PROC/cmdline" 2>/dev/null && return 0
+    [ "$online" = 1 ] || return 0
+    host_configured || return 0
+    [ ! -e "$RUN/usb-auto.used" ] || return 0
+    [ ! -e "$RUN/usb-storage.lock" ] || return 0
+    : > "$RUN/usb-auto.used"
+    "$STORAGE" start || note 'drive mode could not start; retry manually or reconnect USB'
+}
+manager_owned() {
+    [ -s "$RUN/usb-auto.pid" ] || return 1
+    pid=$(cat "$RUN/usb-auto.pid")
+    case "$pid" in ''|*[!0-9]*) fail 'invalid manager PID' ;; esac
+    [ "$pid" -gt 1 ] || fail 'invalid manager PID'
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [ -r "$PROC/$pid/status" ] && awk '/^State:/ && ($2 == "Z" || $2 == "X") { dead=1 } END { exit dead ? 0 : 1 }' "$PROC/$pid/status"; then return 1; fi
+    # A shell script's argv is interpreter, exact script, exact action. Never
+    # match a substring in a foreign process's arguments before signalling it.
+    tr '\000' '\n' < "$PROC/$pid/cmdline" | awk -v self="$SELF" '
+        NR == 1 { interpreter = ($0 == "/bin/sh" || $0 == "/bin/ash" || $0 == "sh" || $0 == "ash") }
+        NR == 2 { script = ($0 == self) }
+        NR == 3 { action = ($0 == "run") }
+        END { exit !(NR == 3 && interpreter && script && action) }
+    ' || fail 'PID is not this manager'
+}
+run_manager() {
+    [ -x "$EVENTS" ] || fail 'event helper is unavailable'
+    mkdir "$RUN/usb-auto.lock" 2>/dev/null || fail 'manager already running or stale lock'
+    event_pid=
+    cleanup() {
+        if [ -n "$event_pid" ]; then
+            kill -TERM "$event_pid" 2>/dev/null || :
+            wait "$event_pid" 2>/dev/null || :
+        fi
+        [ "$(cat "$RUN/usb-auto.pid" 2>/dev/null)" != "$$" ] || rm -f "$RUN/usb-auto.pid"
+        rm -f "$RUN/usb-auto.lock/events"
+        rmdir "$RUN/usb-auto.lock"
+    }
+    trap cleanup EXIT
+    trap 'exit 0' HUP INT TERM
+    echo $$ > "$RUN/usb-auto.pid"
+    mkfifo "$RUN/usb-auto.lock/events"
+    "$EVENTS" > "$RUN/usb-auto.lock/events" &
+    event_pid=$!
+    while IFS= read -r event; do
+        step
+        # Policy may have created an export while the watcher slept on its
+        # idle deadline. Re-evaluate the active eject-check interval immediately.
+        kill -USR1 "$event_pid" 2>/dev/null || fail 'event helper stopped'
+    done < "$RUN/usb-auto.lock/events"
+    fail 'event helper stopped'
+}
+main() {
+    [ "$(id -u)" = 0 ] || fail 'root is required'
+    [ "$#" = 1 ] || fail 'usage: q2-usb-auto start|run|stop|inhibit|resume'
+    mkdir -p "$RUN" "${LOG%/*}"
+    case "$1" in
+        start)
+            if manager_owned; then return; fi
+            "$SELF" run </dev/null >> "$LOG" 2>&1 &
+            launched=$!; n=0
+            while [ "$(cat "$RUN/usb-auto.pid" 2>/dev/null)" != "$launched" ]; do
+                kill -0 "$launched" 2>/dev/null || fail 'manager startup failed'
+                [ "$n" -lt 50 ] || fail 'manager startup timed out'
+                sleep .1; n=$((n+1))
+            done ;;
+        run) run_manager ;;
+        stop)
+            if manager_owned; then
+                kill -TERM "$pid"
+                n=0
+                while kill -0 "$pid" 2>/dev/null; do
+                    if [ -r "$PROC/$pid/status" ] && awk '/^State:/ && ($2 == "Z" || $2 == "X") { dead=1 } END { exit dead ? 0 : 1 }' "$PROC/$pid/status"; then break; fi
+                    [ "$n" -lt 100 ] || fail 'manager did not stop'
+                    sleep .1; n=$((n+1))
+                done
+            fi ;;
+        inhibit) : > "$RUN/usb-auto.inhibit" ;;
+        resume) rm -f "$RUN/usb-auto.inhibit" ;;
+        *) fail 'unknown action' ;;
+    esac
+}
+if [ "${Q2_USB_AUTO_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

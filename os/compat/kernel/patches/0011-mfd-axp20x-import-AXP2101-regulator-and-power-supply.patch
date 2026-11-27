@@ -1,0 +1,964 @@
+From cf3dc7940e694b376f0b602b5d491c853e09927e Mon Sep 17 00:00:00 2001
+From: Olivier Louvignes <olivier@mgcrea.io>
+Date: Sat, 31 Oct 2026 11:29:48 -0500
+Subject: [PATCH 11/12] mfd: axp20x: import AXP2101 regulator and power supply
+ support
+
+Port Olivier Louvignes's seven-patch October 23 AXP2101 submission to the
+Q2 Linux 7.3 development tree, including its DT binding additions.
+Original Message-ID: 20261023100401.67592-1-olivier@mgcrea.io
+Source: https://lore.kernel.org/all/20261023100401.67592-1-olivier@mgcrea.io/
+
+The series derives from Jepl4r/hiby-custom-kernel and was tested by its
+author on a HiBy R1. Those results are not Q2 hardware validation.
+Q2-specific no-IRQ support, stock-binary cross-checks and corrections
+follow separately. Preserve the original author; no new certification
+or upstream submission is implied by this development series.
+---
+ .../bindings/mfd/x-powers,axp152.yaml         |   3 +
+ .../x-powers,axp20x-battery-power-supply.yaml |   1 +
+ .../x-powers,axp20x-usb-power-supply.yaml     |   1 +
+ drivers/mfd/axp20x-i2c.c                      |   2 +
+ drivers/mfd/axp20x.c                          | 107 ++++++++-
+ drivers/power/supply/axp20x_battery.c         | 221 ++++++++++++++++++
+ drivers/power/supply/axp20x_usb_power.c       |  86 +++++++
+ drivers/regulator/axp20x-regulator.c          |  88 +++++++
+ include/linux/mfd/axp20x.h                    | 114 +++++++++
+ 9 files changed, 621 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml b/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml
+index 45f015d63..f5e2c8232 100644
+--- a/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml
++++ b/Documentation/devicetree/bindings/mfd/x-powers,axp152.yaml
+@@ -68,6 +68,7 @@ allOf:
+           compatible:
+             contains:
+               enum:
++                - x-powers,axp2101
+                 - x-powers,axp15060
+                 - x-powers,axp305
+                 - x-powers,axp313a
+@@ -84,6 +85,7 @@ allOf:
+             enum:
+               - x-powers,axp313a
+               - x-powers,axp323
++              - x-powers,axp2101
+               - x-powers,axp15060
+               - x-powers,axp717
+ 
+@@ -108,6 +110,7 @@ properties:
+           - x-powers,axp806
+           - x-powers,axp809
+           - x-powers,axp813
++          - x-powers,axp2101
+           - x-powers,axp15060
+       - items:
+           - const: x-powers,axp228
+diff --git a/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-battery-power-supply.yaml b/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-battery-power-supply.yaml
+index a90d558e7..6a0a0c3f0 100644
+--- a/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-battery-power-supply.yaml
++++ b/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-battery-power-supply.yaml
+@@ -21,6 +21,7 @@ properties:
+       - const: x-powers,axp209-battery-power-supply
+       - const: x-powers,axp221-battery-power-supply
+       - const: x-powers,axp717-battery-power-supply
++      - const: x-powers,axp2101-battery-power-supply
+       - items:
+           - const: x-powers,axp803-battery-power-supply
+           - const: x-powers,axp813-battery-power-supply
+diff --git a/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml b/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml
+index 2ec036405..1c582aa5e 100644
+--- a/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml
++++ b/Documentation/devicetree/bindings/power/supply/x-powers,axp20x-usb-power-supply.yaml
+@@ -25,6 +25,7 @@ properties:
+           - x-powers,axp223-usb-power-supply
+           - x-powers,axp717-usb-power-supply
+           - x-powers,axp813-usb-power-supply
++          - x-powers,axp2101-usb-power-supply
+       - items:
+           - const: x-powers,axp803-usb-power-supply
+           - const: x-powers,axp813-usb-power-supply
+diff --git a/drivers/mfd/axp20x-i2c.c b/drivers/mfd/axp20x-i2c.c
+index 5c93136f9..c1f7bb8e3 100644
+--- a/drivers/mfd/axp20x-i2c.c
++++ b/drivers/mfd/axp20x-i2c.c
+@@ -69,6 +69,7 @@ static const struct of_device_id axp20x_i2c_of_match[] = {
+ 	{ .compatible = "x-powers,axp717", .data = (void *)AXP717_ID },
+ 	{ .compatible = "x-powers,axp803", .data = (void *)AXP803_ID },
+ 	{ .compatible = "x-powers,axp806", .data = (void *)AXP806_ID },
++	{ .compatible = "x-powers,axp2101", .data = (void *)AXP2101_ID },
+ 	{ .compatible = "x-powers,axp15060", .data = (void *)AXP15060_ID },
+ 	{ },
+ };
+@@ -86,6 +87,7 @@ static const struct i2c_device_id axp20x_i2c_id[] = {
+ 	{ "axp717" },
+ 	{ "axp803" },
+ 	{ "axp806" },
++	{ "axp2101" },
+ 	{ "axp15060" },
+ 	{ }
+ };
+diff --git a/drivers/mfd/axp20x.c b/drivers/mfd/axp20x.c
+index 50df66de2..b87d7ef5b 100644
+--- a/drivers/mfd/axp20x.c
++++ b/drivers/mfd/axp20x.c
+@@ -48,6 +48,7 @@ static const char * const axp20x_model_names[] = {
+ 	[AXP806_ID] = "AXP806",
+ 	[AXP809_ID] = "AXP809",
+ 	[AXP813_ID] = "AXP813",
++	[AXP2101_ID] = "AXP2101",
+ 	[AXP15060_ID] = "AXP15060",
+ };
+ 
+@@ -218,6 +219,34 @@ static const struct regmap_access_table axp313a_volatile_table = {
+ 	.n_yes_ranges = ARRAY_SIZE(axp313a_volatile_ranges),
+ };
+ 
++static const struct regmap_range axp2101_writeable_ranges[] = {
++	regmap_reg_range(AXP2101_COMM_CFG, AXP2101_LOW_BATT_WARN),
++	regmap_reg_range(AXP2101_PWROFF_EN, AXP2101_FAST_PWRON_CTRL),
++	regmap_reg_range(AXP2101_ADC_CH_EN, AXP2101_ADC_CH_EN),
++	regmap_reg_range(AXP2101_IRQ0_EN, AXP2101_IRQ2_STATE),
++	regmap_reg_range(AXP2101_TS_PIN_CFG, AXP2101_BTN_CHG_CFG),
++	regmap_reg_range(AXP2101_DCDC_OUTPUT_CONTROL, AXP2101_DLDO2_CONTROL),
++	regmap_reg_range(AXP2101_GAUGE_CFG, AXP2101_GAUGE_CFG),
++};
++
++static const struct regmap_range axp2101_volatile_ranges[] = {
++	regmap_reg_range(AXP2101_PMU_STATUS_1, AXP2101_PMU_STATUS_2),
++	regmap_reg_range(AXP2101_PWRON_STATUS, AXP2101_PWROFF_STATUS),
++	regmap_reg_range(AXP2101_BATT_V_H, AXP2101_DIE_TEMP_L),
++	regmap_reg_range(AXP2101_IRQ0_STATE, AXP2101_IRQ2_STATE),
++	regmap_reg_range(AXP2101_BATT_PERCENT_DATA, AXP2101_TTF_L),
++};
++
++static const struct regmap_access_table axp2101_writeable_table = {
++	.yes_ranges = axp2101_writeable_ranges,
++	.n_yes_ranges = ARRAY_SIZE(axp2101_writeable_ranges),
++};
++
++static const struct regmap_access_table axp2101_volatile_table = {
++	.yes_ranges = axp2101_volatile_ranges,
++	.n_yes_ranges = ARRAY_SIZE(axp2101_volatile_ranges),
++};
++
+ static const struct regmap_range axp717_writeable_ranges[] = {
+ 	regmap_reg_range(AXP717_PMU_FAULT, AXP717_MODULE_EN_CONTROL_1),
+ 	regmap_reg_range(AXP717_MIN_SYS_V_CONTROL, AXP717_BOOST_CONTROL),
+@@ -456,6 +485,15 @@ static const struct regmap_config axp323_regmap_config = {
+ 	.cache_type = REGCACHE_MAPLE,
+ };
+ 
++static const struct regmap_config axp2101_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.wr_table = &axp2101_writeable_table,
++	.volatile_table = &axp2101_volatile_table,
++	.max_register = AXP2101_TTF_L,
++	.cache_type = REGCACHE_MAPLE,
++};
++
+ static const struct regmap_config axp717_regmap_config = {
+ 	.reg_bits = 8,
+ 	.val_bits = 8,
+@@ -663,6 +701,33 @@ static const struct regmap_irq axp313a_regmap_irqs[] = {
+ 	INIT_REGMAP_IRQ(AXP313A, DIE_TEMP_HIGH,		0, 0),
+ };
+ 
++static const struct regmap_irq axp2101_regmap_irqs[] = {
++	INIT_REGMAP_IRQ(AXP2101, BATT_UNDER_TEMP_WORK,	0, 0),
++	INIT_REGMAP_IRQ(AXP2101, BATT_OVER_TEMP_WORK,	0, 1),
++	INIT_REGMAP_IRQ(AXP2101, BATT_UNDER_TEMP_CHG,	0, 2),
++	INIT_REGMAP_IRQ(AXP2101, BATT_OVER_TEMP_CHG,	0, 3),
++	INIT_REGMAP_IRQ(AXP2101, GAUGE_NEW_SOC,		0, 4),
++	INIT_REGMAP_IRQ(AXP2101, GAUGE_WDOG,		0, 5),
++	INIT_REGMAP_IRQ(AXP2101, SOC_DROP_LVL1,		0, 6),
++	INIT_REGMAP_IRQ(AXP2101, SOC_DROP_LVL2,		0, 7),
++	INIT_REGMAP_IRQ(AXP2101, PEK_RIS_EDGE,		1, 0),
++	INIT_REGMAP_IRQ(AXP2101, PEK_FAL_EDGE,		1, 1),
++	INIT_REGMAP_IRQ(AXP2101, PEK_LONG,		1, 2),
++	INIT_REGMAP_IRQ(AXP2101, PEK_SHORT,		1, 3),
++	INIT_REGMAP_IRQ(AXP2101, BATT_REMOVAL,		1, 4),
++	INIT_REGMAP_IRQ(AXP2101, BATT_PLUGIN,		1, 5),
++	INIT_REGMAP_IRQ(AXP2101, VBUS_REMOVAL,		1, 6),
++	INIT_REGMAP_IRQ(AXP2101, VBUS_PLUGIN,		1, 7),
++	INIT_REGMAP_IRQ(AXP2101, BATT_OVER_V,		2, 0),
++	INIT_REGMAP_IRQ(AXP2101, CHARG_TIMER,		2, 1),
++	INIT_REGMAP_IRQ(AXP2101, DIE_TEMP_HIGH,		2, 2),
++	INIT_REGMAP_IRQ(AXP2101, CHARG,			2, 3),
++	INIT_REGMAP_IRQ(AXP2101, CHARG_DONE,		2, 4),
++	INIT_REGMAP_IRQ(AXP2101, BATT_OVER_CURR,	2, 5),
++	INIT_REGMAP_IRQ(AXP2101, LDO_OVER_CURR,		2, 6),
++	INIT_REGMAP_IRQ(AXP2101, WDOG_EXPIRE,		2, 7),
++};
++
+ static const struct regmap_irq axp717_regmap_irqs[] = {
+ 	INIT_REGMAP_IRQ(AXP717, SOC_DROP_LVL2,		0, 7),
+ 	INIT_REGMAP_IRQ(AXP717, SOC_DROP_LVL1,		0, 6),
+@@ -884,6 +949,17 @@ static const struct regmap_irq_chip axp313a_regmap_irq_chip = {
+ 	.num_regs		= 1,
+ };
+ 
++static const struct regmap_irq_chip axp2101_regmap_irq_chip = {
++	.name			= "axp2101_irq_chip",
++	.status_base		= AXP2101_IRQ0_STATE,
++	.ack_base		= AXP2101_IRQ0_STATE,
++	.unmask_base		= AXP2101_IRQ0_EN,
++	.init_ack_masked	= true,
++	.irqs			= axp2101_regmap_irqs,
++	.num_irqs		= ARRAY_SIZE(axp2101_regmap_irqs),
++	.num_regs		= 3,
++};
++
+ static const struct regmap_irq_chip axp717_regmap_irq_chip = {
+ 	.name			= "axp717_irq_chip",
+ 	.status_base		= AXP717_IRQ0_STATE,
+@@ -1061,6 +1137,21 @@ static struct mfd_cell axp313a_cells[] = {
+ 	MFD_CELL_RES("axp313a-pek", axp313a_pek_resources),
+ };
+ 
++static const struct resource axp2101_usb_power_supply_resources[] = {
++	DEFINE_RES_IRQ_NAMED(AXP2101_IRQ_VBUS_PLUGIN, "VBUS_PLUGIN"),
++	DEFINE_RES_IRQ_NAMED(AXP2101_IRQ_VBUS_REMOVAL, "VBUS_REMOVAL"),
++};
++
++/* No driver handles its fuel gauge yet. */
++static struct mfd_cell axp2101_cells[] = {
++	MFD_CELL_NAME("axp20x-regulator"),
++	MFD_CELL_OF("axp20x-usb-power-supply",
++		    axp2101_usb_power_supply_resources, NULL, 0, 0,
++		    "x-powers,axp2101-usb-power-supply"),
++	MFD_CELL_OF("axp20x-battery-power-supply",
++		    NULL, NULL, 0, 0, "x-powers,axp2101-battery-power-supply"),
++};
++
+ static struct mfd_cell axp717_cells[] = {
+ 	MFD_CELL_NAME("axp20x-regulator"),
+ 	MFD_CELL_RES("axp20x-pek", axp717_pek_resources),
+@@ -1241,19 +1332,25 @@ static const struct mfd_cell axp_regulator_only_cells[] = {
+ static int axp20x_power_off(struct sys_off_data *data)
+ {
+ 	struct axp20x_dev *axp20x = data->cb_data;
+-	unsigned int shutdown_reg;
++	unsigned int shutdown_reg, shutdown_bit;
+ 
+ 	switch (axp20x->variant) {
+ 	case AXP323_ID:
+ 	case AXP313A_ID:
+ 		shutdown_reg = AXP313A_SHUTDOWN_CTRL;
++		shutdown_bit = AXP20X_OFF;
++		break;
++	case AXP2101_ID:
++		shutdown_reg = AXP2101_COMM_CFG;
++		shutdown_bit = AXP2101_SOFT_PWROFF;
+ 		break;
+ 	default:
+ 		shutdown_reg = AXP20X_OFF_CTRL;
++		shutdown_bit = AXP20X_OFF;
+ 		break;
+ 	}
+ 
+-	regmap_set_bits(axp20x->regmap, shutdown_reg, AXP20X_OFF);
++	regmap_set_bits(axp20x->regmap, shutdown_reg, shutdown_bit);
+ 
+ 	/* Give capacitors etc. time to drain to avoid kernel panic msg. */
+ 	mdelay(500);
+@@ -1325,6 +1422,12 @@ int axp20x_match_device(struct axp20x_dev *axp20x)
+ 		axp20x->regmap_cfg = &axp717_regmap_config;
+ 		axp20x->regmap_irq_chip = &axp717_regmap_irq_chip;
+ 		break;
++	case AXP2101_ID:
++		axp20x->nr_cells = ARRAY_SIZE(axp2101_cells);
++		axp20x->cells = axp2101_cells;
++		axp20x->regmap_cfg = &axp2101_regmap_config;
++		axp20x->regmap_irq_chip = &axp2101_regmap_irq_chip;
++		break;
+ 	case AXP803_ID:
+ 		axp20x->nr_cells = ARRAY_SIZE(axp803_cells);
+ 		axp20x->cells = axp803_cells;
+diff --git a/drivers/power/supply/axp20x_battery.c b/drivers/power/supply/axp20x_battery.c
+index ee8701a6e..a653ad923 100644
+--- a/drivers/power/supply/axp20x_battery.c
++++ b/drivers/power/supply/axp20x_battery.c
+@@ -91,6 +91,26 @@
+ 
+ #define AXP717_TS_PIN_DISABLE		BIT(4)
+ 
++#define AXP2101_PWR_OP_BATT_PRESENT	BIT(3)
++#define AXP2101_PWR_STATUS_MASK		GENMASK(6, 5)
++#define AXP2101_PWR_STATUS_BAT_STANDBY	0
++#define AXP2101_PWR_STATUS_BAT_CHRG	1
++#define AXP2101_PWR_STATUS_BAT_DISCHRG	2
++#define AXP2101_CHRG_STATE_MASK		GENMASK(2, 0)
++#define AXP2101_CHRG_STATE_TRICKLE	0
++#define AXP2101_CHRG_STATE_PRECHARGE	1
++#define AXP2101_CHRG_STATE_CC		2
++#define AXP2101_CHRG_STATE_CV		3
++#define AXP2101_CHRG_STATE_DONE		4
++/* CV_CHG_SET: end of charge voltage selector, 1 to 5 for 4.0 to 4.4 V. */
++#define AXP2101_CHRG_CV_VOLT_MASK	GENMASK(2, 0)
++#define AXP2101_ICC_MASK		GENMASK(4, 0)
++#define AXP2101_ICC_MAX_SEL		16	/* 1 A; 17 to 31 are reserved */
++#define AXP2101_ITERM_MASK		GENMASK(3, 0)
++#define AXP2101_ITERM_ENABLE		BIT(4)
++#define AXP2101_IPRECHG_MASK		GENMASK(3, 0)
++#define AXP2101_CURRENT_STEP		25000
++
+ struct axp20x_batt_ps;
+ 
+ struct axp_data {
+@@ -213,6 +233,44 @@ static int axp717_battery_get_max_voltage(struct axp20x_batt_ps *axp20x_batt,
+ 	}
+ }
+ 
++/* End of charge voltages of CV_CHG_SET selectors 0 to 7; 0, 6 and 7 are reserved. */
++static const int axp2101_cv_uv[] = {
++	0, 4000000, 4100000, 4200000, 4350000, 4400000, 0, 0,
++};
++
++static int axp2101_battery_get_max_voltage(struct axp20x_batt_ps *axp20x_batt,
++					   int *val)
++{
++	int ret, reg;
++
++	ret = regmap_read(axp20x_batt->regmap, AXP2101_CV_CHG_SET, &reg);
++	if (ret)
++		return ret;
++
++	*val = axp2101_cv_uv[reg & AXP2101_CHRG_CV_VOLT_MASK];
++	return *val ? 0 : -EINVAL;
++}
++
++static int axp2101_battery_set_max_voltage(struct axp20x_batt_ps *axp20x_batt,
++					   int val)
++{
++	int sel;
++
++	for (sel = 0; sel < ARRAY_SIZE(axp2101_cv_uv); sel++)
++		if (axp2101_cv_uv[sel] && axp2101_cv_uv[sel] == val)
++			return regmap_update_bits(axp20x_batt->regmap,
++						  AXP2101_CV_CHG_SET,
++						  AXP2101_CHRG_CV_VOLT_MASK, sel);
++
++	return -EINVAL;
++}
++
++/* CONSTANT_CHARGE_CURRENT: 25 mA steps up to 200 mA, then 100 mA steps. */
++static int axp2101_ccc_from_sel(unsigned int sel)
++{
++	return sel <= 8 ? sel * 25000 : 200000 + (sel - 8) * 100000;
++}
++
+ static int axp813_battery_get_max_voltage(struct axp20x_batt_ps *axp20x_batt,
+ 					  int *val)
+ {
+@@ -425,6 +483,89 @@ static int axp20x_battery_get_prop(struct power_supply *psy,
+ 	return 0;
+ }
+ 
++static int axp2101_battery_get_prop(struct power_supply *psy,
++				    enum power_supply_property psp,
++				    union power_supply_propval *val)
++{
++	struct axp20x_batt_ps *axp20x_batt = power_supply_get_drvdata(psy);
++	int ret, reg;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_PRESENT:
++	case POWER_SUPPLY_PROP_ONLINE:
++		ret = regmap_read(axp20x_batt->regmap, AXP2101_PMU_STATUS_1,
++				  &reg);
++		if (ret)
++			return ret;
++
++		val->intval = !!(reg & AXP2101_PWR_OP_BATT_PRESENT);
++		return 0;
++
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = regmap_read(axp20x_batt->regmap, AXP2101_PMU_STATUS_2,
++				  &reg);
++		if (ret)
++			return ret;
++
++		switch (FIELD_GET(AXP2101_CHRG_STATE_MASK, reg)) {
++		case AXP2101_CHRG_STATE_PRECHARGE:
++		case AXP2101_CHRG_STATE_CC:
++		case AXP2101_CHRG_STATE_CV:
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++			return 0;
++		case AXP2101_CHRG_STATE_DONE:
++			val->intval = POWER_SUPPLY_STATUS_FULL;
++			return 0;
++		}
++
++		/* Trickle charging or not charging: by the current direction. */
++		switch (FIELD_GET(AXP2101_PWR_STATUS_MASK, reg)) {
++		case AXP2101_PWR_STATUS_BAT_STANDBY:
++			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
++			return 0;
++		case AXP2101_PWR_STATUS_BAT_CHRG:
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++			return 0;
++		case AXP2101_PWR_STATUS_BAT_DISCHRG:
++			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
++			return 0;
++		default:
++			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
++			return 0;
++		}
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		ret = regmap_read(axp20x_batt->regmap, AXP2101_ICC_CHG_SET,
++				  &reg);
++		if (ret)
++			return ret;
++
++		val->intval = axp2101_ccc_from_sel(FIELD_GET(AXP2101_ICC_MASK,
++							     reg));
++		return 0;
++
++	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
++		return axp2101_battery_get_max_voltage(axp20x_batt,
++						       &val->intval);
++
++	case POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT:
++		ret = regmap_read(axp20x_batt->regmap, AXP2101_ITERM_CHG_SET,
++				  &reg);
++		if (ret)
++			return ret;
++
++		if (!(reg & AXP2101_ITERM_ENABLE))
++			val->intval = 0;
++		else
++			val->intval = FIELD_GET(AXP2101_ITERM_MASK, reg) *
++				      AXP2101_CURRENT_STEP;
++		return 0;
++
++	default:
++		return -EINVAL;
++	}
++}
++
+ static int axp717_battery_get_prop(struct power_supply *psy,
+ 				   enum power_supply_property psp,
+ 				   union power_supply_propval *val)
+@@ -852,6 +993,15 @@ static enum power_supply_property axp20x_battery_props[] = {
+ 	POWER_SUPPLY_PROP_CAPACITY,
+ };
+ 
++static enum power_supply_property axp2101_battery_props[] = {
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
++};
++
+ static enum power_supply_property axp717_battery_props[] = {
+ 	POWER_SUPPLY_PROP_PRESENT,
+ 	POWER_SUPPLY_PROP_ONLINE,
+@@ -895,6 +1045,15 @@ static const struct power_supply_desc axp209_batt_ps_desc = {
+ 	.set_property = axp20x_battery_set_prop,
+ };
+ 
++/* Read-only: the charge settings come from the monitored battery. */
++static const struct power_supply_desc axp2101_batt_ps_desc = {
++	.name = "axp20x-battery",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = axp2101_battery_props,
++	.num_properties = ARRAY_SIZE(axp2101_battery_props),
++	.get_property = axp2101_battery_get_prop,
++};
++
+ static const struct power_supply_desc axp717_batt_ps_desc = {
+ 	.name = "axp20x-battery",
+ 	.type = POWER_SUPPLY_TYPE_BATTERY,
+@@ -978,6 +1137,57 @@ static void axp209_set_battery_info(struct platform_device *pdev,
+ 	}
+ }
+ 
++static int axp2101_bat_cfg_iio_channels(struct platform_device *pdev,
++					struct axp20x_batt_ps *axp_batt)
++{
++	return 0;
++}
++
++/*
++ * Programs the charger from the monitored battery: end of charge voltage,
++ * constant charge current, termination and precharge currents. What the
++ * battery doesn't give is left as it is.
++ */
++static void axp2101_set_battery_info(struct platform_device *pdev,
++				     struct axp20x_batt_ps *axp_batt,
++				     struct power_supply_battery_info *info)
++{
++	int cv = info->constant_charge_voltage_max_uv;
++	int ccc = info->constant_charge_current_max_ua;
++	int iterm = info->charge_term_current_ua;
++	int iprechg = info->precharge_current_ua;
++	unsigned int sel;
++
++	if (cv > 0 && axp2101_battery_set_max_voltage(axp_batt, cv))
++		dev_err(&pdev->dev, "unsupported charge voltage %d uV\n", cv);
++
++	if (ccc > 0) {
++		if (ccc <= 200000)
++			sel = ccc / AXP2101_CURRENT_STEP;
++		else
++			sel = min((ccc - 200000) / 100000 + 8,
++				  AXP2101_ICC_MAX_SEL);
++		axp_batt->max_ccc = axp2101_ccc_from_sel(sel);
++		regmap_update_bits(axp_batt->regmap, AXP2101_ICC_CHG_SET,
++				   AXP2101_ICC_MASK, sel);
++	}
++
++	if (iterm > 0) {
++		sel = min(iterm / AXP2101_CURRENT_STEP,
++			  (int)FIELD_MAX(AXP2101_ITERM_MASK));
++		regmap_update_bits(axp_batt->regmap, AXP2101_ITERM_CHG_SET,
++				   AXP2101_ITERM_MASK | AXP2101_ITERM_ENABLE,
++				   sel | AXP2101_ITERM_ENABLE);
++	}
++
++	if (iprechg > 0) {
++		sel = min(iprechg / AXP2101_CURRENT_STEP,
++			  (int)FIELD_MAX(AXP2101_IPRECHG_MASK));
++		regmap_update_bits(axp_batt->regmap, AXP2101_IPRECHG_SET,
++				   AXP2101_IPRECHG_MASK, sel);
++	}
++}
++
+ static void axp717_set_battery_info(struct platform_device *pdev,
+ 				    struct axp20x_batt_ps *axp_batt,
+ 				    struct power_supply_battery_info *info)
+@@ -1047,6 +1257,14 @@ static const struct axp_data axp221_data = {
+ 	.set_bat_info = axp209_set_battery_info,
+ };
+ 
++static const struct axp_data axp2101_data = {
++	.bat_ps_desc = &axp2101_batt_ps_desc,
++	.get_max_voltage = axp2101_battery_get_max_voltage,
++	.set_max_voltage = axp2101_battery_set_max_voltage,
++	.cfg_iio_chan = axp2101_bat_cfg_iio_channels,
++	.set_bat_info = axp2101_set_battery_info,
++};
++
+ static const struct axp_data axp717_data = {
+ 	.ccc_scale = 64000,
+ 	.ccc_offset = 0,
+@@ -1082,6 +1300,9 @@ static const struct of_device_id axp20x_battery_ps_id[] = {
+ 	}, {
+ 		.compatible = "x-powers,axp717-battery-power-supply",
+ 		.data = (void *)&axp717_data,
++	}, {
++		.compatible = "x-powers,axp2101-battery-power-supply",
++		.data = (void *)&axp2101_data,
+ 	}, {
+ 		.compatible = "x-powers,axp813-battery-power-supply",
+ 		.data = (void *)&axp813_data,
+diff --git a/drivers/power/supply/axp20x_usb_power.c b/drivers/power/supply/axp20x_usb_power.c
+index e951b2b64..594f0492b 100644
+--- a/drivers/power/supply/axp20x_usb_power.c
++++ b/drivers/power/supply/axp20x_usb_power.c
+@@ -31,6 +31,7 @@
+ #define AXP20X_PWR_STATUS_VBUS_USED	BIT(4)
+ 
+ #define AXP717_PWR_STATUS_VBUS_GOOD	BIT(5)
++#define AXP2101_PWR_STATUS_VBUS_GOOD	BIT(5)
+ 
+ #define AXP20X_USB_STATUS_VBUS_VALID	BIT(2)
+ 
+@@ -172,6 +173,24 @@ static void axp717_usb_power_poll_vbus(struct work_struct *work)
+ 	power->old_status = val;
+ }
+ 
++static void axp2101_usb_power_poll_vbus(struct work_struct *work)
++{
++	struct axp20x_usb_power *power =
++		container_of(work, struct axp20x_usb_power, vbus_detect.work);
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(power->regmap, AXP2101_PMU_STATUS_1, &val);
++	if (ret)
++		return;
++
++	val &= AXP2101_PWR_STATUS_VBUS_GOOD;
++	if (val != power->old_status)
++		power_supply_changed(power->supply);
++
++	power->old_status = val;
++}
++
+ static int axp20x_get_usb_type(struct axp20x_usb_power *power,
+ 			       union power_supply_propval *val)
+ {
+@@ -315,6 +334,42 @@ static int axp20x_usb_power_get_property(struct power_supply *psy,
+ 	return 0;
+ }
+ 
++/* Input current limits of AXP2101_IIN_LIM; 6 and 7 are reserved. */
++static const int axp2101_usb_curr_lim_table[] = {
++	100000, 500000, 900000, 1000000, 1500000, 2000000,
++};
++
++static int axp2101_usb_power_get_property(struct power_supply *psy,
++					  enum power_supply_property psp,
++					  union power_supply_propval *val)
++{
++	struct axp20x_usb_power *power = power_supply_get_drvdata(psy);
++	unsigned int v;
++	int ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		ret = regmap_field_read(power->curr_lim_fld, &v);
++		if (ret)
++			return ret;
++		if (v >= ARRAY_SIZE(axp2101_usb_curr_lim_table))
++			return -EINVAL;
++		val->intval = axp2101_usb_curr_lim_table[v];
++		break;
++	case POWER_SUPPLY_PROP_ONLINE:
++	case POWER_SUPPLY_PROP_PRESENT:
++		ret = regmap_read(power->regmap, AXP2101_PMU_STATUS_1, &v);
++		if (ret)
++			return ret;
++		val->intval = !!(v & AXP2101_PWR_STATUS_VBUS_GOOD);
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
+ static int axp717_usb_power_get_property(struct power_supply *psy,
+ 	enum power_supply_property psp, union power_supply_propval *val)
+ {
+@@ -643,6 +698,12 @@ static enum power_supply_property axp22x_usb_power_properties[] = {
+ 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+ };
+ 
++static enum power_supply_property axp2101_usb_power_properties[] = {
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_PRESENT,
++};
++
+ static enum power_supply_property axp717_usb_power_properties[] = {
+ 	POWER_SUPPLY_PROP_HEALTH,
+ 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+@@ -682,6 +743,14 @@ static const struct power_supply_desc axp22x_usb_power_desc = {
+ 	.set_property = axp20x_usb_power_set_property,
+ };
+ 
++static const struct power_supply_desc axp2101_usb_power_desc = {
++	.name = "axp20x-usb",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.properties = axp2101_usb_power_properties,
++	.num_properties = ARRAY_SIZE(axp2101_usb_power_properties),
++	.get_property = axp2101_usb_power_get_property,
++};
++
+ static const struct power_supply_desc axp717_usb_power_desc = {
+ 	.name = "axp20x-usb",
+ 	.type = POWER_SUPPLY_TYPE_USB,
+@@ -722,6 +791,11 @@ static const char * const axp22x_irq_names[] = {
+ 	"VBUS_REMOVAL",
+ };
+ 
++static const char * const axp2101_irq_names[] = {
++	"VBUS_PLUGIN",
++	"VBUS_REMOVAL",
++};
++
+ static const char * const axp717_irq_names[] = {
+ 	"VBUS_PLUGIN",
+ 	"VBUS_REMOVAL",
+@@ -815,6 +889,15 @@ static const struct axp_data axp223_data = {
+ 	.axp20x_cfg_adc_reg = axp20x_configure_adc_registers,
+ };
+ 
++static const struct axp_data axp2101_data = {
++	.power_desc	= &axp2101_usb_power_desc,
++	.irq_names	= axp2101_irq_names,
++	.num_irq_names	= ARRAY_SIZE(axp2101_irq_names),
++	.curr_lim_fld	= REG_FIELD(AXP2101_IIN_LIM, 0, 2),
++	.vbus_needs_polling = false,
++	.axp20x_read_vbus = &axp2101_usb_power_poll_vbus,
++};
++
+ static const struct axp_data axp717_data = {
+ 	.power_desc     = &axp717_usb_power_desc,
+ 	.irq_names      = axp717_irq_names,
+@@ -1056,6 +1139,9 @@ static const struct of_device_id axp20x_usb_power_match[] = {
+ 	}, {
+ 		.compatible = "x-powers,axp717-usb-power-supply",
+ 		.data = &axp717_data,
++	}, {
++		.compatible = "x-powers,axp2101-usb-power-supply",
++		.data = &axp2101_data,
+ 	}, {
+ 		.compatible = "x-powers,axp813-usb-power-supply",
+ 		.data = &axp813_data,
+diff --git a/drivers/regulator/axp20x-regulator.c b/drivers/regulator/axp20x-regulator.c
+index da891415e..00ccadf5c 100644
+--- a/drivers/regulator/axp20x-regulator.c
++++ b/drivers/regulator/axp20x-regulator.c
+@@ -765,6 +765,81 @@ static const struct regulator_desc axp313a_regulators[] = {
+ 	AXP_DESC_FIXED(AXP313A, RTC_LDO, "rtc-ldo", "vin1", 1800),
+ };
+ 
++static const struct linear_range axp2101_dcdc2_ranges[] = {
++	REGULATOR_LINEAR_RANGE(500000, 0, 70, 10000),
++	REGULATOR_LINEAR_RANGE(1220000, 71, 87, 20000),
++};
++
++static const struct linear_range axp2101_dcdc3_ranges[] = {
++	REGULATOR_LINEAR_RANGE(500000, 0, 70, 10000),
++	REGULATOR_LINEAR_RANGE(1220000, 71, 87, 20000),
++	REGULATOR_LINEAR_RANGE(1600000, 88, 106, 100000),
++};
++
++static const struct linear_range axp2101_dcdc4_ranges[] = {
++	REGULATOR_LINEAR_RANGE(500000, 0, 70, 10000),
++	REGULATOR_LINEAR_RANGE(1220000, 71, 102, 20000),
++};
++
++/* DCDC5 has 1.4-3.7 V in 100 mV steps, and 1.2 V on selector 25. */
++static const struct linear_range axp2101_dcdc5_ranges[] = {
++	REGULATOR_LINEAR_RANGE(1400000, 0, 23, 100000),
++	REGULATOR_LINEAR_RANGE(1200000, 25, 25, 0),
++};
++
++#define AXP2101_DCDC_V_OUT_MASK		GENMASK(6, 0)
++#define AXP2101_DCDC15_V_OUT_MASK	GENMASK(4, 0)
++#define AXP2101_LDO_V_OUT_MASK		GENMASK(4, 0)
++
++static const struct regulator_desc axp2101_regulators[] = {
++	AXP_DESC(AXP2101, DCDC1, "dcdc1", "vin1", 1500, 3400, 100,
++		 AXP2101_DCDC1_CONTROL, AXP2101_DCDC15_V_OUT_MASK,
++		 AXP2101_DCDC_OUTPUT_CONTROL, BIT(0)),
++	AXP_DESC_RANGES(AXP2101, DCDC2, "dcdc2", "vin2",
++			axp2101_dcdc2_ranges, 88,
++			AXP2101_DCDC2_CONTROL, AXP2101_DCDC_V_OUT_MASK,
++			AXP2101_DCDC_OUTPUT_CONTROL, BIT(1)),
++	AXP_DESC_RANGES(AXP2101, DCDC3, "dcdc3", "vin3",
++			axp2101_dcdc3_ranges, 107,
++			AXP2101_DCDC3_CONTROL, AXP2101_DCDC_V_OUT_MASK,
++			AXP2101_DCDC_OUTPUT_CONTROL, BIT(2)),
++	AXP_DESC_RANGES(AXP2101, DCDC4, "dcdc4", "vin4",
++			axp2101_dcdc4_ranges, 103,
++			AXP2101_DCDC4_CONTROL, AXP2101_DCDC_V_OUT_MASK,
++			AXP2101_DCDC_OUTPUT_CONTROL, BIT(3)),
++	AXP_DESC_RANGES(AXP2101, DCDC5, "dcdc5", "vin5",
++			axp2101_dcdc5_ranges, 26,
++			AXP2101_DCDC5_CONTROL, AXP2101_DCDC15_V_OUT_MASK,
++			AXP2101_DCDC_OUTPUT_CONTROL, BIT(4)),
++	AXP_DESC(AXP2101, ALDO1, "aldo1", "aldoin", 500, 3500, 100,
++		 AXP2101_ALDO1_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(0)),
++	AXP_DESC(AXP2101, ALDO2, "aldo2", "aldoin", 500, 3500, 100,
++		 AXP2101_ALDO2_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(1)),
++	AXP_DESC(AXP2101, ALDO3, "aldo3", "aldoin", 500, 3500, 100,
++		 AXP2101_ALDO3_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(2)),
++	AXP_DESC(AXP2101, ALDO4, "aldo4", "aldoin", 500, 3500, 100,
++		 AXP2101_ALDO4_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(3)),
++	AXP_DESC(AXP2101, BLDO1, "bldo1", "bldoin", 500, 3500, 100,
++		 AXP2101_BLDO1_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(4)),
++	AXP_DESC(AXP2101, BLDO2, "bldo2", "bldoin", 500, 3500, 100,
++		 AXP2101_BLDO2_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(5)),
++	AXP_DESC(AXP2101, DLDO1, "dldo1", "dldoin", 500, 3400, 100,
++		 AXP2101_DLDO1_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(7)),
++	AXP_DESC(AXP2101, DLDO2, "dldo2", "dldoin", 500, 1400, 50,
++		 AXP2101_DLDO2_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO1_OUTPUT_CONTROL, BIT(0)),
++	AXP_DESC(AXP2101, CPUSLDO, "cpusldo", "cpusldoin", 500, 1400, 50,
++		 AXP2101_CPUSLDO_CONTROL, AXP2101_LDO_V_OUT_MASK,
++		 AXP2101_LDO0_OUTPUT_CONTROL, BIT(6)),
++};
++
+ static const struct linear_range axp717_dcdc1_ranges[] = {
+ 	REGULATOR_LINEAR_RANGE(500000,   0, 70, 10000),
+ 	REGULATOR_LINEAR_RANGE(1220000, 71, 87, 20000),
+@@ -1346,6 +1421,15 @@ static int axp20x_set_dcdc_freq(struct platform_device *pdev, u32 dcdcfreq)
+ 		def = 3000;
+ 		step = 150;
+ 		break;
++	case AXP2101_ID:
++		/* Not known to be configurable. */
++		if (dcdcfreq != 0) {
++			dev_err(&pdev->dev,
++				"DCDC frequency on this PMIC is not configurable.\n");
++			return -EINVAL;
++		}
++
++		return 0;
+ 	case AXP313A_ID:
+ 	case AXP323_ID:
+ 	case AXP717_ID:
+@@ -1589,6 +1673,10 @@ static int axp20x_regulator_probe(struct platform_device *pdev)
+ 		regulators = axp717_regulators;
+ 		nregulators = AXP717_REG_ID_MAX;
+ 		break;
++	case AXP2101_ID:
++		regulators = axp2101_regulators;
++		nregulators = AXP2101_REG_ID_MAX;
++		break;
+ 	case AXP803_ID:
+ 		regulators = axp803_regulators;
+ 		nregulators = AXP803_REG_ID_MAX;
+diff --git a/include/linux/mfd/axp20x.h b/include/linux/mfd/axp20x.h
+index b352661d9..21db12a41 100644
+--- a/include/linux/mfd/axp20x.h
++++ b/include/linux/mfd/axp20x.h
+@@ -25,6 +25,7 @@ enum axp20x_variants {
+ 	AXP806_ID,
+ 	AXP809_ID,
+ 	AXP813_ID,
++	AXP2101_ID,
+ 	AXP15060_ID,
+ 	NR_AXP20X_VARIANTS,
+ };
+@@ -116,6 +117,74 @@ enum axp20x_variants {
+ #define AXP313A_IRQ_STATE		0x21
+ #define AXP323_DCDC_MODE_CTRL2		0x22
+ 
++#define AXP2101_PMU_STATUS_1		0x00
++#define AXP2101_PMU_STATUS_2		0x01
++#define AXP2101_CHIP_ID			0x03
++#define AXP2101_COMM_CFG		0x10
++#define AXP2101_BATFET_CTRL		0x12
++#define AXP2101_DIE_TEMP_CTRL		0x13
++#define AXP2101_MIN_SYS_V_CTRL		0x14
++#define AXP2101_VIN_DPM			0x15
++#define AXP2101_IIN_LIM			0x16
++#define AXP2101_GAUGE_RESET		0x17
++#define AXP2101_MODULE_EN		0x18
++#define AXP2101_WDT_CTRL		0x19
++#define AXP2101_LOW_BATT_WARN		0x1a
++#define AXP2101_PWRON_STATUS		0x20
++#define AXP2101_PWROFF_STATUS		0x21
++#define AXP2101_PWROFF_EN		0x22
++#define AXP2101_DCDC_OVP_UVP		0x23
++#define AXP2101_VSYS_V_POWEROFF		0x24
++#define AXP2101_PWROK_SEQ		0x25
++#define AXP2101_SLEEP_WAKEUP		0x26
++#define AXP2101_IRQ_LEVEL_OFF_ON	0x27
++#define AXP2101_FAST_PWRON_CFG0		0x28
++#define AXP2101_FAST_PWRON_CTRL		0x2b
++#define AXP2101_ADC_CH_EN		0x30
++#define AXP2101_BATT_V_H		0x34
++#define AXP2101_DIE_TEMP_L		0x3d
++#define AXP2101_IRQ0_EN			0x40
++#define AXP2101_IRQ1_EN			0x41
++#define AXP2101_IRQ2_EN			0x42
++#define AXP2101_IRQ0_STATE		0x48
++#define AXP2101_IRQ1_STATE		0x49
++#define AXP2101_IRQ2_STATE		0x4a
++#define AXP2101_TS_PIN_CFG		0x50
++#define AXP2101_TS_HYSL2H		0x52
++#define AXP2101_JEITA_CFG		0x58
++#define AXP2101_IPRECHG_SET		0x61
++#define AXP2101_ICC_CHG_SET		0x62
++#define AXP2101_ITERM_CHG_SET		0x63
++#define AXP2101_CV_CHG_SET		0x64
++#define AXP2101_CHGLED_CFG		0x69
++#define AXP2101_BTN_CHG_CFG		0x6a
++#define AXP2101_DCDC_OUTPUT_CONTROL	0x80
++#define AXP2101_DCDC_FORCE_PWM		0x81
++#define AXP2101_DCDC1_CONTROL		0x82
++#define AXP2101_DCDC2_CONTROL		0x83
++#define AXP2101_DCDC3_CONTROL		0x84
++#define AXP2101_DCDC4_CONTROL		0x85
++#define AXP2101_DCDC5_CONTROL		0x86
++#define AXP2101_DCDC_MODE_CTRL		0x87
++#define AXP2101_LDO0_OUTPUT_CONTROL	0x90
++#define AXP2101_LDO1_OUTPUT_CONTROL	0x91
++#define AXP2101_ALDO1_CONTROL		0x92
++#define AXP2101_ALDO2_CONTROL		0x93
++#define AXP2101_ALDO3_CONTROL		0x94
++#define AXP2101_ALDO4_CONTROL		0x95
++#define AXP2101_BLDO1_CONTROL		0x96
++#define AXP2101_BLDO2_CONTROL		0x97
++#define AXP2101_CPUSLDO_CONTROL		0x98
++#define AXP2101_DLDO1_CONTROL		0x99
++#define AXP2101_DLDO2_CONTROL		0x9a
++#define AXP2101_GAUGE_CFG		0xa2
++#define AXP2101_BATT_PERCENT_DATA	0xa4
++#define AXP2101_TTE_H			0xa6
++#define AXP2101_TTF_L			0xa9
++
++/* Bit 0 of COMM_CFG powers the PMIC off. */
++#define AXP2101_SOFT_PWROFF		BIT(0)
++
+ #define AXP717_ON_INDICATE		0x00
+ #define AXP717_PMU_STATUS_2		0x01
+ #define AXP717_BC_DETECT		0x05
+@@ -498,6 +567,24 @@ enum {
+ 	AXP313A_REG_ID_MAX,
+ };
+ 
++enum {
++	AXP2101_DCDC1 = 0,
++	AXP2101_DCDC2,
++	AXP2101_DCDC3,
++	AXP2101_DCDC4,
++	AXP2101_DCDC5,
++	AXP2101_ALDO1,
++	AXP2101_ALDO2,
++	AXP2101_ALDO3,
++	AXP2101_ALDO4,
++	AXP2101_BLDO1,
++	AXP2101_BLDO2,
++	AXP2101_DLDO1,
++	AXP2101_DLDO2,
++	AXP2101_CPUSLDO,
++	AXP2101_REG_ID_MAX,
++};
++
+ enum {
+ 	AXP717_DCDC1 = 0,
+ 	AXP717_DCDC2,
+@@ -819,6 +906,33 @@ enum axp313a_irqs {
+ 	AXP313A_IRQ_PEK_RIS_EDGE,
+ };
+ 
++enum axp2101_irqs {
++	AXP2101_IRQ_BATT_UNDER_TEMP_WORK,
++	AXP2101_IRQ_BATT_OVER_TEMP_WORK,
++	AXP2101_IRQ_BATT_UNDER_TEMP_CHG,
++	AXP2101_IRQ_BATT_OVER_TEMP_CHG,
++	AXP2101_IRQ_GAUGE_NEW_SOC,
++	AXP2101_IRQ_GAUGE_WDOG,
++	AXP2101_IRQ_SOC_DROP_LVL1,
++	AXP2101_IRQ_SOC_DROP_LVL2,
++	AXP2101_IRQ_PEK_RIS_EDGE,
++	AXP2101_IRQ_PEK_FAL_EDGE,
++	AXP2101_IRQ_PEK_LONG,
++	AXP2101_IRQ_PEK_SHORT,
++	AXP2101_IRQ_BATT_REMOVAL,
++	AXP2101_IRQ_BATT_PLUGIN,
++	AXP2101_IRQ_VBUS_REMOVAL,
++	AXP2101_IRQ_VBUS_PLUGIN,
++	AXP2101_IRQ_BATT_OVER_V,
++	AXP2101_IRQ_CHARG_TIMER,
++	AXP2101_IRQ_DIE_TEMP_HIGH,
++	AXP2101_IRQ_CHARG,
++	AXP2101_IRQ_CHARG_DONE,
++	AXP2101_IRQ_BATT_OVER_CURR,
++	AXP2101_IRQ_LDO_OVER_CURR,
++	AXP2101_IRQ_WDOG_EXPIRE,
++};
++
+ enum axp717_irqs {
+ 	AXP717_IRQ_VBUS_FAULT,
+ 	AXP717_IRQ_VBUS_OVER_V,

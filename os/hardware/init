@@ -1,0 +1,27 @@
+#!/bin/busybox sh
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+/bin/busybox --install -s /bin
+mount -t devtmpfs none /dev
+exec </dev/ttyS3 >/dev/ttyS3 2>&1
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t tmpfs -o mode=0755,nosuid,nodev none /run
+mkdir -p /dev/pts /run/dropbear /run/log
+mount -t devpts -o mode=0620 none /dev/pts
+hostname q2-diagnostic
+umask 077
+echo 'Q2 diagnostic: RAM root; optional Wi-Fi/storage drivers require explicit loading.'
+if /sbin/q2-diagnostic-usb; then
+    echo Q2_DIAGNOSTIC_USB_READY
+    # -s disables all password logins. Never provide an empty-password mode.
+    # Runtime-generated keys intentionally disappear with this RAM-only root.
+    set -- -R
+    if [ -s /etc/dropbear/hostkey ]; then set -- -r /etc/dropbear/hostkey; fi
+    /usr/sbin/dropbear -F -E -s "$@" -p 192.168.77.2:22 > /run/log/ssh 2>&1 &
+else
+    echo 'Q2 diagnostic: USB setup failed; see console. No flash was touched.'
+fi
+dmesg > /run/log/boot
+printf 'Q2_DIAGNOSTIC_READY\n'
+# UART is the emulator/debug console; there is no unauthenticated USB shell.
+while :; do setsid sh -c 'exec sh </dev/ttyS0 >/dev/ttyS0 2>&1'; sleep 1; done

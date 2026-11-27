@@ -1,0 +1,4 @@
+#!/bin/sh
+case "$1" in
+    start) echo 'Q2_OS_READY source-built userspace' ;;
+esac

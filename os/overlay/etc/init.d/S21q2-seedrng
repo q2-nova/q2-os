@@ -1,0 +1,9 @@
+#!/bin/sh
+# Run after state is mounted. Never ship seed material in the image.
+case "$1" in
+    start|stop|reload|restart)
+        [ "$(cat /run/q2/state-status 2>/dev/null)" = ready ] || exit 0
+        seedrng --seed-dir=/state/seedrng || echo 'Q2_ENTROPY=seed-save-failed'
+        ;;
+    *) exit 2 ;;
+esac

@@ -1,0 +1,48 @@
+From 70570c80fa8fcaa22f87e960c51f0c6784763357 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 14:05:13 -0500
+Subject: [PATCH 21/21] MIPS: ingenic: enable X2000 hotplug and restore
+ per-core IRQ gates
+
+---
+ arch/mips/generic/smp-ingenic-x2000.c | 7 +++++++
+ arch/mips/ingenic/Kconfig             | 2 ++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/arch/mips/generic/smp-ingenic-x2000.c b/arch/mips/generic/smp-ingenic-x2000.c
+index e6df4953b..2c16f04e0 100644
+--- a/arch/mips/generic/smp-ingenic-x2000.c
++++ b/arch/mips/generic/smp-ingenic-x2000.c
+@@ -158,6 +158,8 @@ static void x2000_smp_finish(void)
+ {
+ 	unsigned int cpu = smp_processor_id();
+ 
++	ccu_update(CCU_PIMR, 0, BIT(cpu));
++	ccu_update(CCU_OIMR, 0, BIT(cpu));
+ 	ccu_update(CCU_MIMR, 0, BIT(cpu));
+ 	enable_percpu_irq(X2000_MAILBOX_IRQ, IRQ_TYPE_NONE);
+ 	change_c0_status(ST0_IM, STATUSF_IP2 | STATUSF_IP3 | STATUSF_IP4);
+@@ -168,8 +170,13 @@ static int x2000_cpu_disable(void)
+ {
+ 	unsigned int cpu = smp_processor_id();
+ 
++	if (!cpu)
++		return -EBUSY;
++
+ 	set_cpu_online(cpu, false);
+ 	calculate_cpu_foreign_map();
++	ccu_update(CCU_PIMR, BIT(cpu), 0);
++	ccu_update(CCU_OIMR, BIT(cpu), 0);
+ 	irq_migrate_all_off_this_cpu();
+ 	clear_tasks_mm_cpumask(cpu);
+ 
+diff --git a/arch/mips/ingenic/Kconfig b/arch/mips/ingenic/Kconfig
+index ca1d087fe..0a91d8bdd 100644
+--- a/arch/mips/ingenic/Kconfig
++++ b/arch/mips/ingenic/Kconfig
+@@ -94,3 +94,5 @@ config MACH_X2000
+ 
+ config INGENIC_X2000_SMP
+ 	def_bool SMP && MACH_X2000 && !MIPS_CPS
++	select SYS_SUPPORTS_HOTPLUG_CPU
++	select GENERIC_IRQ_MIGRATION if HOTPLUG_CPU

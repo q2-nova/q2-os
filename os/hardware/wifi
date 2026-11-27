@@ -1,0 +1,30 @@
+#!/bin/sh
+# Manual diagnostic driver lifecycle only; does not configure credentials.
+set -eu
+case "${1:-status}" in
+start)
+    modprobe 8733bs
+    modprobe fixed
+    modprobe sdhci-ingenic-x2000
+    if [ ! -e /sys/bus/platform/devices/13460000.mmc/driver ]; then
+        echo 13460000.mmc > /sys/bus/platform/drivers/sdhci-ingenic-x2000/bind
+    fi
+    echo 'Wi-Fi drivers loaded. A wlan interface requires successful chip probe.'
+    ;;
+stop)
+    # Fail visibly rather than forcing removal of a busy driver.
+    if [ -d /sys/module/8733bs ]; then rmmod 8733bs; fi
+    # MSC2 serves the SD card through the same driver. Unbind only MSC1 so
+    # stopping Wi-Fi cannot detach a mounted update card.
+    if [ -e /sys/bus/platform/devices/13460000.mmc/driver ]; then
+        echo 13460000.mmc > /sys/bus/platform/drivers/sdhci-ingenic-x2000/unbind
+    fi
+    ;;
+status)
+    cat /proc/modules
+    for dir in /sys/class/mmc_host /sys/class/net; do
+        [ ! -d "$dir" ] || ls "$dir"
+    done
+    ;;
+*) echo 'Usage: q2-wifi start|stop|status' >&2; exit 2 ;;
+esac

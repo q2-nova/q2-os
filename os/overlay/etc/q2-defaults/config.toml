@@ -1,0 +1,9 @@
+# Generated development fixture. No owner credentials or external services.
+[server]
+url = "http://127.0.0.1:4533"
+user = "q2-fixture"
+password = "synthetic-test-only"
+[wifi]
+enabled = false
+[display]
+timezone = "UTC"

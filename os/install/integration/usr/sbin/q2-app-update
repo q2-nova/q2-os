@@ -1,0 +1,322 @@
+#!/bin/sh
+# Transactional app images. All public mutations share the service control lock.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+umask 077
+D=/state/app-updates
+R=/run/q2nd
+M=/run/q2-app
+CHECK=/run/q2-app-check
+OS=/etc/q2-os-release.json
+SERVICE=/sbin/q2-installed-services
+PROC=/proc
+SYS=/sys
+fail() { echo "q2-app-update: $*" >&2; exit 1; }
+hash() { sha256sum "$1" | awk '{print $1}'; }
+is_hash() { [ "${#1}" = 64 ] && case "$1" in *[!0-9a-f]*) false;; *) true;; esac; }
+regular() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    # BusyBox in the qualified image has no stat applet.
+    set -- $(ls -nd "$1")
+    [ "$3" = 0 ]
+}
+setup() {
+    [ -d /state ] && [ ! -L /state ] || fail 'invalid state root'
+    set -- $(ls -nd /state)
+    [ "$3" = 0 ] || fail 'state root not root-owned'
+    [ ! -L "$D" ] && [ ! -L "$R" ] || fail 'symlink update directory'
+    mkdir -p "$D" "$R"
+    set -- $(ls -nd "$D")
+    [ "$3" = 0 ] || fail 'update directory not root-owned'
+    chmod 700 "$D"
+    set -- $(ls -nd "$R")
+    [ "$3" = 0 ] || fail 'runtime directory not root-owned'
+    regular "$OS" || fail 'invalid OS release identity'
+}
+# State has a single atomic commit point. A missing record is the builtin state.
+read_state() {
+    active=builtin previous=builtin staged=none phase=stable
+    [ -e "$D/state" ] || { [ ! -L "$D/state" ] || fail 'symlink state record'; return 0; }
+    regular "$D/state" && [ "$(wc -c < "$D/state")" -le 240 ] || fail 'invalid state record'
+    [ "$(wc -l < "$D/state")" -eq 1 ] || fail 'invalid state lines'
+    raw=$(cat "$D/state")
+    set -f; set -- $raw; set +f
+    [ "$#" = 5 ] && [ "$1" = Q2STATE1 ] || fail 'invalid state fields'
+    [ "$raw" = "$1 $2 $3 $4 $5" ] || fail 'noncanonical state'
+    active=$2 previous=$3 staged=$4 phase=$5
+    { [ "$active" = builtin ] || is_hash "$active"; } && { [ "$previous" = builtin ] || is_hash "$previous"; } && { [ "$staged" = none ] || is_hash "$staged"; } || fail 'invalid state identity'
+    case "$phase" in stable|trial|running) ;; *) fail 'invalid state phase';; esac
+    [ "$phase" = stable ] || [ "$staged" != none ] || fail 'trial without candidate'
+}
+write_state() {
+    [ ! -L "$D/state.new" ] || fail 'invalid state temporary'
+    printf 'Q2STATE1 %s %s %s %s\n' "$active" "$previous" "$staged" "$phase" > "$D/state.new"
+    sync
+    mv -f "$D/state.new" "$D/state"
+    sync
+}
+read_manifest() {
+    regular "$1" && [ "$(wc -c < "$1")" -le 256 ] && [ "$(wc -l < "$1")" -eq 1 ] || fail 'invalid manifest'
+    raw=$(cat "$1")
+    set -f; set -- $raw; set +f
+    [ "$#" = 5 ] && [ "$1" = Q2APP1 ] || fail 'invalid manifest fields'
+    [ "$raw" = "$1 $2 $3 $4 $5" ] || fail 'noncanonical manifest'
+    version=$2 app_sha=$3 image_sha=$4 os_sha=$5
+    printf '%s\n' "$version" | awk '/^[0-9]+\.[0-9]+\.[0-9]+$/ {ok=1} END {exit !ok}' || fail 'invalid version'
+    is_hash "$app_sha" && is_hash "$image_sha" && is_hash "$os_sha" || fail 'invalid manifest digest'
+    [ "$(hash "$OS")" = "$os_sha" ] || fail 'OS release mismatch'
+}
+image_path() { printf '%s/%s.squashfs' "$D" "$1"; }
+verify_image() {
+    id=$1
+    read_manifest "$D/$id.manifest"
+    [ "$image_sha" = "$id" ] || fail 'manifest identity mismatch'
+    file=$(image_path "$id")
+    regular "$file" && [ "$(wc -c < "$file")" -le 8388608 ] && [ "$(hash "$file")" = "$id" ] || fail 'image verification failed'
+}
+mount_image() {
+    id=$1 dest=$2
+    verify_image "$id"
+    mkdir -p "$dest"
+    [ ! -L "$dest" ] || fail 'invalid mountpoint'
+    [ -z "$(awk -v p="$dest" '$2 == p {print $1}' "$PROC/mounts")" ] || fail 'mountpoint already occupied'
+    mount -t squashfs -o ro,loop,nosuid,nodev,exec "$(image_path "$id")" "$dest" || fail 'image mount failed'
+    if ! regular "$dest/q2nd" || [ ! -x "$dest/q2nd" ] || [ "$(hash "$dest/q2nd")" != "$app_sha" ]; then
+        umount "$dest" || :
+        fail 'application verification failed'
+    fi
+}
+mount_selected() (
+    mount_image "$1" "$M"
+    # Reuse the digest just checked by mount_image. Bind this volatile record
+    # to the kernel ID of the verified mount, not a subsequently read manifest.
+    if ! (
+        exec 8<"$M/q2nd"
+        mount_id=
+        while read -r field value rest; do
+            if [ "$field" = mnt_id: ]; then mount_id=$value; break; fi
+        done < /proc/self/fdinfo/8
+        case "$mount_id" in ''|*[!0-9]*) exit 1 ;; esac
+        [ ! -e "$R/app-build" ] && [ ! -L "$R/app-build" ] || exit 1
+        (
+            set -C
+            printf 'Q2APPBUILD1 %s %s\n' "$mount_id" "$app_sha" > "$R/app-build.new"
+        ) && mv -f "$R/app-build.new" "$R/app-build"
+    ); then
+        rm -f "$R/app-build.new" || :
+        echo 'q2-app-update: cannot publish verified application identity' >&2
+    fi
+)
+check_version() {
+    dest=$1
+    # Unknown arguments on older builds start the player. Isolate that probe
+    # from owner data and bound both its lifetime and output.
+    probe=$R/version-probe
+    mkdir "$probe" || { umount "$dest" || :; fail 'version probe unavailable'; }
+    if ! (ulimit -f 4; timeout -k 1 5 env -i PATH=/bin:/usr/bin Q2ND_PLATFORM=headless Q2ND_DATA="$probe" Q2ND_REQUIRE_HEALTH=0 "$dest/q2nd" --version > "$probe/out" 2>/dev/null); then
+        rm -rf "$probe"; umount "$dest" || :; fail 'application version probe failed'
+    fi
+    if [ "$(wc -l < "$probe/out")" -ne 1 ] || [ "$(cat "$probe/out")" != "$version" ]; then
+        rm -rf "$probe"; umount "$dest" || :; fail 'application version mismatch'
+    fi
+    rm -rf "$probe"
+}
+unmount_app() {
+    entry=$(awk -v p="$M" '$2 == p {print $1 " " $3}' "$PROC/mounts")
+    if [ -z "$entry" ]; then
+        rm -f "$R/app-build"
+        return
+    fi
+    set -- $entry
+    [ "$#" = 2 ] && [ "$2" = squashfs ] || fail 'foreign application mount'
+    case "$1" in /dev/loop[0-9]*) loop=${1##*/} ;; *) fail 'foreign application mount';; esac
+    backing=$(cat "$SYS/block/$loop/loop/backing_file" 2>/dev/null) || fail 'missing loop identity'
+    case "$backing" in "$D"/*.squashfs) identity=${backing#"$D"/}; identity=${identity%.squashfs} ;; *) fail 'foreign loop backing';; esac
+    is_hash "$identity" || fail 'invalid loop identity'
+    umount "$M" || fail 'application unmount failed'
+    rm -f "$R/app-build"
+}
+clean_orphans() {
+    for path in "$D"/*.squashfs "$D"/*.manifest; do
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        name=${path##*/}; identity=${name%%.*}
+        is_hash "$identity" || continue
+        case "$name" in "$identity.squashfs"|"$identity.manifest") ;; *) continue;; esac
+        if [ "$identity" != "$active" ] && [ "$identity" != "$previous" ] && [ "$identity" != "$staged" ]; then
+            rm -f "$path"
+        fi
+    done
+    sync
+}
+free_k() { df -Pk "$D" | awk 'NR==2 {print $4}'; }
+stage() {
+    [ "$#" = 2 ] || fail 'stage requires image and manifest'
+    read_state
+    [ "$phase" = stable ] && [ "$staged" = none ] || fail 'candidate already staged or in trial'
+    clean_orphans
+    regular "$1" || fail 'invalid input image'
+    read_manifest "$2"
+    candidate=$image_sha
+    [ "$candidate" != "$active" ] || fail 'already active'
+    size=$(wc -c < "$1")
+    [ "$size" -gt 0 ] && [ "$size" -le 8388608 ] || fail 'image exceeds size bound'
+    # Retire only an incomplete candidate for this exact identity.
+    if [ "$candidate" != "$previous" ]; then
+        rm -f "$(image_path "$candidate")" "$D/$candidate.manifest"
+    else
+        fail 'candidate is retained previous image; use rollback'
+    fi
+    rm -f "$D/image.new" "$D/manifest.new"
+    sync
+    need=$(( (size + 1023) / 1024 + 2064 ))
+    available=$(free_k)
+    case "$available" in ''|*[!0-9]*) fail 'cannot measure free space';; esac
+    if [ "$available" -lt "$need" ] && [ "$previous" != builtin ] && [ "$previous" != "$active" ]; then
+        obsolete=$previous; previous=builtin; write_state
+        rm -f "$(image_path "$obsolete")" "$D/$obsolete.manifest"
+        sync
+        available=$(free_k)
+    fi
+    [ "$available" -ge "$need" ] || fail 'insufficient space with reserve'
+    [ ! -e "$D/$candidate.squashfs" ] && [ ! -L "$D/$candidate.squashfs" ] && [ ! -e "$D/$candidate.manifest" ] && [ ! -L "$D/$candidate.manifest" ] || fail 'candidate already exists'
+    [ ! -L "$D/image.new" ] && [ ! -L "$D/manifest.new" ] || fail 'invalid temporary path'
+    rm -f "$D/image.new" "$D/manifest.new"
+    cp "$1" "$D/image.new"
+    cp "$2" "$D/manifest.new"
+    [ "$(hash "$D/image.new")" = "$candidate" ] || fail 'image checksum mismatch'
+    read_manifest "$D/manifest.new"
+    [ "$image_sha" = "$candidate" ] || fail 'manifest changed during copy'
+    sync
+    mv "$D/image.new" "$(image_path "$candidate")"
+    mv "$D/manifest.new" "$D/$candidate.manifest"
+    sync
+    mount_image "$candidate" "$CHECK"
+    check_version "$CHECK"
+    umount "$CHECK" || fail 'validation unmount failed'
+    available=$(free_k)
+    case "$available" in ''|*[!0-9]*) fail 'cannot measure free space';; esac
+    [ "$available" -ge 2064 ] || fail 'insufficient post-copy reserve'
+    staged=$candidate; write_state
+}
+# Only called by the owning service, after the prior player is stopped.
+prepare() {
+    read_state
+    unmount_app
+    if [ "$phase" = running ]; then staged=none; phase=stable; write_state; fi
+    if [ "$phase" = trial ] && [ "$(cat "$R/app-trial" 2>/dev/null)" != "$staged" ]; then
+        staged=none; phase=stable; write_state
+    fi
+    selected=$active
+    if [ "$phase" = trial ]; then
+        selected=$staged; phase=running; write_state
+    fi
+    rm -f "$R/app-trial"
+    if [ "$selected" != builtin ]; then
+        # A changed base or damaged image must never prevent the builtin launch.
+        if (mount_selected "$selected"); then
+            printf '%s\n' "$M/q2nd" > "$R/app-player"
+            printf '%s\n' "$selected" > "$R/app-image"
+            return
+        fi
+        if [ "$phase" = running ]; then
+            staged=none; phase=stable; write_state
+            if [ "$active" != builtin ] && (mount_selected "$active"); then
+                printf '%s\n' "$M/q2nd" > "$R/app-player"
+                printf '%s\n' "$active" > "$R/app-image"
+                return
+            fi
+        fi
+    fi
+    printf '%s\n' /usr/bin/q2nd > "$R/app-player"
+    printf '%s\n' builtin > "$R/app-image"
+}
+failed() {
+    read_state
+    if [ "$phase" = running ]; then staged=none; phase=stable; write_state; fi
+}
+confirm() {
+    [ "$#" = 3 ] || fail 'confirm requires PID start-ticks image-sha'
+    pid=$1 ticks=$2 expected=$3
+    case "$pid:$ticks" in *[!0-9:]*|:*|*:) fail 'invalid process identity';; esac
+    is_hash "$expected" || fail 'invalid image identity'
+    read_state
+    [ "$phase" = running ] && [ "$staged" = "$expected" ] || fail 'no matching trial'
+    [ "$(cat "$R/player.pid" 2>/dev/null)" = "$pid" ] && [ "$(cat "$R/app-image" 2>/dev/null)" = "$expected" ] && [ "$(cat "$R/ready" 2>/dev/null)" = "$pid" ] && [ "$(cat "$R/healthy" 2>/dev/null)" = "$pid" ] || fail 'trial not healthy'
+    [ -r "$PROC/$pid/stat" ] && [ "$(awk '{sub(/^.*\) /, ""); print $20}' "$PROC/$pid/stat")" = "$ticks" ] || fail 'stale process identity'
+    [ "$(readlink "$PROC/$pid/exe")" = "$M/q2nd" ] && kill -0 "$pid" 2>/dev/null || fail 'trial process is not live'
+    verify_image "$expected"
+    obsolete=$previous
+    previous=$active; active=$staged; staged=none; phase=stable; write_state
+    if [ "$obsolete" != builtin ] && [ "$obsolete" != "$active" ] && [ "$obsolete" != "$previous" ]; then
+        rm -f "$(image_path "$obsolete")" "$D/$obsolete.manifest"; sync
+    fi
+}
+own_control=0
+own_update=0
+cleanup_locks() {
+    [ "$own_update" = 0 ] || rmdir "$R/app-update.lock"
+    [ "$own_control" = 0 ] || rmdir "$R/control.lock"
+}
+update_lock() {
+    n=0
+    while ! mkdir "$R/app-update.lock" 2>/dev/null; do
+        [ "$n" -lt 600 ] || fail 'update transaction lock busy or stale'
+        sleep .1; n=$((n+1))
+    done
+    own_update=1
+    trap cleanup_locks EXIT
+    trap 'exit 1' HUP INT TERM
+}
+update_unlock() {
+    rmdir "$R/app-update.lock" || fail 'cannot release update transaction lock'
+    own_update=0
+}
+control() {
+    # Source the maintained owner rather than racing its lock or stop protocol.
+    Q2_SERVICES_SOURCE_ONLY=1 . "$SERVICE"
+    unset Q2_SERVICES_SOURCE_ONLY
+    control_lock
+    own_control=1
+    trap cleanup_locks EXIT
+    setup
+    [ "$(cat "$STATE_STATUS" 2>/dev/null)" = ready ] && usb_local || fail 'storage is not locally available'
+    case "$action" in
+        stage) update_lock; stage "$@"; update_unlock ;;
+        apply)
+            update_lock; read_state
+            [ "$phase" = stable ] && [ "$staged" != none ] || fail 'no staged candidate'
+            update_unlock; stop_service
+            update_lock; read_state
+            [ "$phase" = stable ] && [ "$staged" != none ] || fail 'no staged candidate'
+            [ ! -L "$R/app-trial" ] || fail 'invalid trial token'
+            printf '%s\n' "$staged" > "$R/app-trial"
+            phase=trial; write_state; update_unlock
+            if ! (start_service); then
+                rm -f "$R/app-trial"
+                fail 'trial service could not start; pending trial will roll back'
+            fi ;;
+        confirm) update_lock; confirm "$@"; update_unlock ;;
+        disable)
+            stop_service; update_lock; read_state
+            if [ "$active" != builtin ]; then previous=$active; fi
+            active=builtin; staged=none; phase=stable; write_state
+            rm -f "$R/app-trial"; update_unlock; start_service ;;
+        rollback)
+            stop_service; update_lock; read_state
+            if [ "$phase" != stable ] || [ "$staged" != none ]; then staged=none; phase=stable
+            else swap=$active; active=$previous; previous=$swap; fi
+            write_state; update_unlock; start_service ;;
+    esac
+}
+
+action=${1:-}; [ "$#" -eq 0 ] || shift
+case "$action" in
+    capability) [ "$#" = 0 ] || fail 'capability takes no arguments'; echo 'Q2APP1 max-image=8388608 reserve=2097152';;
+    status) [ "$#" = 0 ] || fail 'status takes no arguments'; setup; read_state; printf 'Q2STATE1 %s %s %s %s\n' "$active" "$previous" "$staged" "$phase";;
+    stage|confirm) control "$@";;
+    apply|rollback|disable) [ "$#" = 0 ] || fail 'unexpected arguments'; control "$@";;
+    prepare|failed) [ "$#" = 0 ] || fail 'unexpected arguments'; setup; update_lock; "$action"; update_unlock;;
+    unmount) [ "$#" = 0 ] || fail 'unexpected arguments'; setup; update_lock; unmount_app; update_unlock;;
+    *) fail 'usage: q2-app-update capability|status|stage|apply|confirm|rollback|disable';;
+esac

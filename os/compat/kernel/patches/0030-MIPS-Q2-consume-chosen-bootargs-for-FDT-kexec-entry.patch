@@ -1,0 +1,22 @@
+From 42ae4cb1899a44936fbb4d3d4a32276f37ce37fe Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 17:43:07 -0500
+Subject: [PATCH] MIPS: Q2: consume chosen bootargs for FDT kexec entry
+
+The independent Buildroot integration exposed that UHI a0=-2 entry
+carries command-line flags in the FDT. Select DTB command-line sourcing;
+cold boot without chosen bootargs still falls back to bootloader
+arguments.
+---
+ arch/mips/configs/shanling_q2_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index 93facf7ce..5b8503d15 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -111,3 +111,4 @@ CONFIG_PHY_INGENIC_X2000_USB=y
+ CONFIG_CONFIGFS_FS=y
+ CONFIG_USB_CONFIGFS=y
+ CONFIG_USB_CONFIGFS_RNDIS=y
++CONFIG_MIPS_CMDLINE_FROM_DTB=y

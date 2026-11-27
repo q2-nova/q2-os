@@ -1,0 +1,514 @@
+#!/bin/sh
+# Exclusive microSD ownership handoff. No forced unmount or forced host eject.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+CARD=/dev/mmcblk0
+PART=/dev/mmcblk0p1
+CARD_MOUNT=/mnt/mmc
+STATE_MOUNT=/state
+STATE_FILE=/mnt/mmc/.q2-mainline-dev-20261102/state.ext4
+SYS=/sys
+PROC=/proc
+RUN=/run/q2
+SERVICES=/etc/init.d
+SERVICE_RUN=/run/q2nd
+INSTALLED_SERVICE=/sbin/q2-installed-services
+profile=trial
+DEFER_RESTART=0
+loop=
+SESSION=$RUN/usb-storage
+LOCK=$RUN/usb-storage.lock
+
+fail() {
+    if [ -d "$SESSION" ]; then
+        case "$*" in *'host has not ejected'*) code=eject-required ;; *) code=operation-failed ;; esac
+        printf '%s\n' "$code" > "$SESSION/error"
+    fi
+    echo "q2-usb-storage: $*" >&2
+    exit 1
+}
+phase() {
+    printf '%s\n' "$1" > "$SESSION/phase"
+    bootmark "usb-phase-$1"
+    case "$1" in preparing|local-ready) : > "$RUN/usb-auto.used" ;; esac
+    rm -f "$SESSION/error"
+}
+bootmark() {
+    file=$RUN/usb-stage-times
+    [ ! -L "$file" ] && { [ ! -e "$file" ] || { [ -f "$file" ] && [ "$(wc -c < "$file")" -lt 65408 ]; }; } || return 0
+    read -r uptime idle 2>/dev/null < "$PROC/uptime" || return 0
+    case "$uptime" in *.*) ;; *) return 0 ;; esac
+    case "${uptime%.*}:${uptime#*.}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+    printf '%s %s\n' "$uptime" "$1" >> "$file" 2>/dev/null || :
+}
+status_start() {
+    control=/usr/sbin/q2-usb-status-control
+    [ -x "$control" ] || control=$RUN/q2-usb-status-control
+    [ -x "$control" ] || fail 'USB display controller is absent; no export occurred'
+    "$control" start || fail 'USB display failed; no export occurred'
+}
+status_stop() {
+    control=/usr/sbin/q2-usb-status-control
+    [ -x "$control" ] || control=$RUN/q2-usb-status-control
+    [ ! -s "$RUN/usb-status.pid" ] || "$control" stop || fail 'USB display could not release the panel'
+}
+block_device() { [ -b "$1" ]; }
+mounted() { awk -v target="$1" '$2 == target { print $1 " " $3 }' "$PROC/mounts"; }
+value() { cat "$SESSION/$1"; }
+
+# Kernel threads have an exe symlink that cannot be read, and zombies no
+# longer own an executable or descriptors. An active inaccessible process is
+# different: its ownership must not be guessed away.
+inactive_process() {
+    directory=$1
+    [ -d "$directory" ] || return 0
+    if status=$(cat "$directory/status" 2>/dev/null); then
+        printf '%s\n' "$status" | awk '
+            /^Kthread:/ && $2 == 1 { inactive=1 }
+            /^State:/ && ($2 == "Z" || $2 == "X") { inactive=1 }
+            END { exit inactive ? 0 : 1 }'
+    else
+        [ ! -d "$directory" ]
+    fi
+}
+
+# AXP2101 ONLINE reads PMU_STATUS_1/VBUS_GOOD directly. UDC state is not
+# physical evidence: our own unbind, bus reset and enumeration all change it.
+vbus_online() { cat "$SYS/class/power_supply/axp20x-usb/online" 2>/dev/null || :; }
+vbus_sample_pause() { sleep .1; }
+confirmed_disconnect() {
+    sample=0
+    while [ "$sample" -lt 3 ]; do
+        [ "$(vbus_online)" = 0 ] || return 1
+        sample=$((sample+1))
+        [ "$sample" = 3 ] || vbus_sample_pause
+    done
+}
+unbind_gadget() { printf '\n' > "$gadget/UDC"; }
+close_lun() { printf '\n' > "$lun/file"; }
+
+# The exported LUN is the whole disk (its own block-device cache); the local
+# mount is the partition. The kernel drops each cache when its last opener
+# closes, but a release the helper cannot see (the mass-storage thread's
+# deferred close after a host eject) can leave one populated. Write back and
+# drop both before either side reads the card again
+# (docs/bugs/exfat-migration-readonly-2026-11-18.md).
+have_blockdev() { command -v blockdev >/dev/null 2>&1; }
+flush_card_caches() {
+    if ! have_blockdev; then bootmark usb-flushbufs-unavailable; return 0; fi
+    blockdev --flushbufs "$PART" && blockdev --flushbufs "$CARD"
+}
+# exFAT VolumeFlags (boot sector byte 106), bit 1 VolumeDirty: a writer
+# mounted the card and did not unmount it, e.g. a host that lost the cable.
+card_flags() { dd if="$PART" bs=1 skip=106 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n'; }
+have_card_fsck() { command -v fsck.exfat >/dev/null 2>&1; }
+card_fsck() { fsck.exfat -n "$PART" >/dev/null 2>&1; }
+# Mount options for the return: read-only when a dirty card fails a check.
+card_mount_options() {
+    flags=$(card_flags) || flags=
+    case "$flags" in ''|*[!0-9]*) echo nosuid,nodev,noexec; return ;; esac
+    if [ $((flags & 2)) -eq 0 ]; then echo nosuid,nodev,noexec; return; fi
+    bootmark usb-card-dirty
+    if have_card_fsck && ! card_fsck; then
+        bootmark usb-card-check-failed
+        : > "$RUN/card-readonly"
+        echo ro,nosuid,nodev,noexec
+        return
+    fi
+    echo nosuid,nodev,noexec
+}
+
+validate_card() {
+    block_device "$CARD" && block_device "$PART" || fail 'expected card/partition block devices are absent'
+    path=$(readlink -f "$SYS/class/block/mmcblk0/device") || fail 'cannot identify microSD controller'
+    case "$path" in */13490000.mmc/*) ;; *) fail 'mmcblk0 is not the Q2 MSC2 card slot' ;; esac
+    [ "$(cat "$SYS/class/block/mmcblk0/device/type")" = SD ] || fail 'MSC2 device is not an SD card'
+    cid=$(cat "$SYS/class/block/mmcblk0/device/cid") || fail 'cannot read card identity'
+    case "$cid" in ''|*[!0-9a-fA-F]*) fail 'invalid card identity' ;; esac
+    [ ${#cid} -eq 32 ] || fail 'invalid card identity length'
+    [ ! -e "$SESSION/cid" ] || [ "$cid" = "$(value cid)" ] || fail 'card changed during USB session'
+}
+
+validate_internal_state() {
+    # Match the bind-mounted mainline namespace, not merely any UBIFS mount.
+    internal=$(awk -v target="$STATE_MOUNT" '$5 == target && $4 == "/q2-mainline" {
+        for (i=7; i<=NF; i++) if ($i == "-" && $(i+1) == "ubifs") print $(i+2)
+    }' "$PROC/self/mountinfo")
+    case "$internal" in /dev/ubi[0-9]*_[0-9]*) ;; *) fail 'unknown internal state mount' ;; esac
+    [ "$(mounted "$STATE_MOUNT")" = "$internal ubifs" ] || fail 'inconsistent internal state mount'
+    volume=${internal#/dev/}
+    case "${volume#ubi}" in *[!0-9_]*|_*|*_) fail 'invalid internal state volume' ;; esac
+    [ "$(cat "$SYS/class/ubi/$volume/name")" = user_data ] || fail 'unexpected internal state volume'
+    parent=${volume%_*}
+    mtd=$(cat "$SYS/class/ubi/$parent/mtd_num") || fail 'internal state MTD is unknown'
+    case "$mtd" in ''|*[!0-9]*) fail 'invalid internal state MTD' ;; esac
+    [ "$(cat "$SYS/class/mtd/mtd$mtd/name")" = userdata ] || fail 'internal state is not on userdata NAND'
+    [ ! -e "$SESSION/internal" ] || [ "$(value internal)" = "$internal" ] || fail 'internal state changed during USB session'
+}
+
+validate_layout() {
+    [ "$(mounted "$CARD_MOUNT")" = "$PART exfat" ] || fail 'supported profile requires exFAT card at /mnt/mmc'
+    state=$(mounted "$STATE_MOUNT")
+    case "$state" in *' ubifs')
+        validate_internal_state
+        profile=internal
+        loop=
+        return ;;
+    esac
+    profile=trial
+    loop=${state% ext4}
+    case "$loop" in /dev/loop[0-9]*) ;; *) fail 'supported profile requires ext4 loop state at /state' ;; esac
+    [ "$state" = "$loop ext4" ] || fail 'unexpected state filesystem'
+    loop_name=${loop##*/}
+    case "${loop_name#loop}" in ''|*[!0-9]*) fail 'invalid state loop device' ;; esac
+    [ "$(cat "$SYS/class/block/$loop_name/loop/backing_file")" = "$STATE_FILE" ] || fail 'unknown state backing file; refusing to guess layout'
+    [ ! -L "$STATE_FILE" ] || fail 'state image must not be a symbolic link'
+}
+
+select_gadget() {
+    gadget=
+    for g in "$SYS/kernel/config/usb_gadget/"*; do
+        [ -d "$g" ] || continue
+        [ -n "$(cat "$g/UDC")" ] || continue
+        [ -z "$gadget" ] || fail 'more than one active gadget'
+        case "${g##*/}" in q2diag|q2net) gadget=$g ;; *) fail 'unknown active USB gadget' ;; esac
+    done
+    [ -n "$gadget" ] || fail 'start the Q2 RNDIS management gadget first'
+    [ -L "$gadget/configs/c.1/rndis.usb0" ] || fail 'expected RNDIS function is absent'
+    [ ! -e "$gadget/functions/mass_storage.q2card" ] || fail 'unowned mass-storage function already exists'
+    for f in "$gadget/functions/"mass_storage.*; do
+        [ ! -e "$f" ] || fail 'another mass-storage function exists'
+    done
+    udc=$(cat "$gadget/UDC")
+    [ -d "$SYS/class/udc/$udc" ] || fail 'unknown USB controller'
+}
+
+load_session() {
+    [ -d "$SESSION" ] && [ ! -L "$SESSION" ] || fail 'no owned storage session'
+    gadget=$(value gadget)
+    case "$gadget" in "$SYS/kernel/config/usb_gadget/q2diag"|"$SYS/kernel/config/usb_gadget/q2net") ;; *) fail 'invalid saved gadget' ;; esac
+    udc=$(value udc)
+    [ -d "$SYS/class/udc/$udc" ] || fail 'saved USB controller is unavailable'
+    profile=$(cat "$SESSION/profile" 2>/dev/null || printf trial)
+    case "$profile" in internal) validate_internal_state; loop= ;;
+    trial)
+    loop=$(value loop)
+    loop_name=${loop##*/}
+    case "$loop" in /dev/loop[0-9]*) ;; *) fail 'invalid saved loop' ;; esac
+    case "${loop_name#loop}" in ''|*[!0-9]*) fail 'invalid saved loop' ;; esac
+    ;; *) fail 'unknown saved storage profile' ;; esac
+    lun=$gadget/functions/mass_storage.q2card/lun.0
+    validate_card
+}
+
+stop_player() {
+    # S80 refuses to launch unless this status is ready. Leave it blocked on error.
+    printf '%s\n' usb-storage > "$RUN/state-status"
+    if [ "$profile" = internal ]; then
+        printf '%s\n' installed > "$SESSION/player"
+        "$INSTALLED_SERVICE" stop || fail 'installed player/supervisor stop failed'
+    elif [ -e "$SERVICE_RUN/launcher.pid" ] || [ -e "$SERVICE_RUN/supervisor.pid" ]; then
+        printf '%s\n' service > "$SESSION/player"
+        "$SERVICES/S80q2-player" stop || fail 'player/supervisor stop failed'
+    else
+        printf '%s\n' manual > "$SESSION/player"
+        if [ -s "$RUN/player.pid" ]; then
+            pid=$(cat "$RUN/player.pid")
+            case "$pid" in ''|*[!0-9]*) fail 'invalid manual player PID' ;; esac
+            if kill -0 "$pid" 2>/dev/null; then
+                exe=$(readlink "$PROC/$pid/exe") || fail 'cannot identify manual player'
+                exe=${exe%" (deleted)"}
+                case "${exe##*/}" in q2nd|q2nd-*|player) ;; *) fail 'manual PID is not a recognized player executable' ;; esac
+                kill -TERM "$pid" || fail 'cannot stop manual player'
+                n=0
+                while kill -0 "$pid" 2>/dev/null; do
+                    [ "$n" -lt 15 ] || fail 'player did not exit; refusing forced termination'
+                    sleep 1; n=$((n+1))
+                done
+            fi
+        fi
+    fi
+    # Refuse untracked players, including ones launched outside the service.
+    for directory in "$PROC"/[0-9]*; do
+        [ -d "$directory" ] || continue
+        inactive_process "$directory" && continue
+        exe=$directory/exe
+        if ! name=$(readlink "$exe"); then
+            inactive_process "$directory" && continue
+            name=$(readlink "$exe") || {
+                inactive_process "$directory" && continue
+                fail 'cannot inspect active process executable'
+            }
+        fi
+        name=${name%" (deleted)"}
+        case "${name##*/}" in q2nd|q2nd-*|player) fail 'a player process remains; register/stop it before USB storage' ;; esac
+    done
+}
+
+assert_detached() {
+    # Detect direct partition mounts in every readable process mount namespace.
+    devs=' '
+    hexdevs=' '
+    for b in "$SYS/class/block/mmcblk0" "$SYS/class/block/"mmcblk0p*; do
+        [ -e "$b/dev" ] || continue
+        number=$(cat "$b/dev")
+        devs="$devs$number "
+        hexdevs="$hexdevs$(printf '%x:%x' "${number%:*}" "${number#*:}") "
+        for holder in "$b/holders/"*; do
+            [ ! -e "$holder" ] || fail 'card has a block-layer holder'
+        done
+    done
+    for mounts in "$PROC"/[0-9]*/mountinfo; do
+        [ -e "$mounts" ] || continue
+        # A vanished /proc entry is an I/O error, not positive mount evidence.
+        # In particular BusyBox awk uses exit 1 for errors too. Keep evidence in
+        # stdout and preserve the applet's error status instead of overloading it.
+        if mounted_dev=$(awk -v devs="$devs" 'index(devs, " " $3 " ") { print $3; exit }' "$mounts"); then
+            if [ -n "$mounted_dev" ]; then
+                owner=${mounts%/mountinfo}; owner=${owner##*/}
+                fail "card remains mounted in a process namespace (PID $owner device $mounted_dev)"
+            fi
+        else
+            inactive_process "${mounts%/mountinfo}" || fail 'cannot inspect active mount namespace'
+        fi
+    done
+    # A detached state loop, other card-backed loop, or swap file cannot coexist
+    # with host writes. Refuse all backing files under the card mount hierarchy.
+    for backing in "$SYS/class/block/"loop*/loop/backing_file; do
+        [ -e "$backing" ] || continue
+        name=$(cat "$backing") || fail 'cannot inspect loop ownership'
+        case "$name" in "$CARD_MOUNT"/*|"$CARD"|"$PART") fail 'card-backed loop remains attached' ;; esac
+    done
+    while read -r name rest; do
+        case "$name" in "$CARD"|"$CARD"p*|"$CARD_MOUNT"/*) fail 'card is used for swap' ;; esac
+        if [ "$profile" = trial ]; then
+            case "$name" in "$STATE_MOUNT"/*|"$loop") fail 'card/state is used for swap' ;; esac
+        fi
+    done < "$PROC/swaps"
+    # Block-device FDs are not represented by mountinfo or sysfs holders.
+    for fd in "$PROC"/[0-9]*/fd/*; do
+        [ -L "$fd" ] || continue
+        if ! name=$(readlink "$fd"); then
+            [ ! -L "$fd" ] && [ ! -e "$fd" ] && continue
+            inactive_process "${fd%/fd/*}" && continue
+            # An active process may close a descriptor and reuse its number
+            # between readlink's ENOENT and the existence checks. Inspect that
+            # current descriptor once more; do not waive a new card handle.
+            if ! name=$(readlink "$fd"); then
+                [ ! -L "$fd" ] && [ ! -e "$fd" ] && continue
+                inactive_process "${fd%/fd/*}" && continue
+                fail 'cannot inspect active open descriptor'
+            fi
+        fi
+        case "$name" in "$CARD"|"$CARD"p*|"$CARD_MOUNT"/*) fail 'card still has an open descriptor' ;; esac
+        if [ "$profile" = trial ]; then
+            case "$name" in "$STATE_MOUNT"/*|"$loop") fail 'card/state still has an open descriptor' ;; esac
+        fi
+        if [ -b "$fd" ]; then
+            number=$(stat -L -c '%t:%T' "$fd") || fail 'cannot identify open block device'
+            case "$hexdevs" in *" $number "*) fail 'card has an open block-device alias' ;; esac
+        fi
+    done
+}
+
+start() {
+    bootmark usb-start-requested
+    [ ! -e "$SESSION" ] || fail 'session already exists; use status/stop/retry-export'
+    validate_card
+    validate_layout
+    select_gadget
+    bootmark usb-layout-validated
+    mkdir "$SESSION"
+    printf '%s\n' "$cid" > "$SESSION/cid"
+    printf '%s\n' "$loop" > "$SESSION/loop"
+    printf '%s\n' "$gadget" > "$SESSION/gadget"
+    printf '%s\n' "$udc" > "$SESSION/udc"
+    printf '%s\n' "$profile" > "$SESSION/profile"
+    if [ "$profile" = internal ]; then printf '%s\n' "$internal" > "$SESSION/internal"; fi
+    phase preparing
+    bootmark usb-player-stop-begin
+    stop_player
+    bootmark usb-player-stop-returned
+    bootmark usb-status-start-begin
+    status_start
+    bootmark usb-status-start-returned
+    bootmark usb-sync-begin
+    sync
+    bootmark usb-sync-returned
+    if [ "$profile" = trial ]; then
+    umount "$STATE_MOUNT" || fail 'state is busy; no export occurred'
+    # mount -o loop can mark the loop autoclear: the final unmount then
+    # detaches it before losetup runs. Absence is safe; a failed detach with a
+    # remaining backing file is not.
+    backing=$SYS/class/block/$loop_name/loop/backing_file
+    if [ -e "$backing" ]; then
+        [ "$(cat "$backing")" = "$STATE_FILE" ] || fail 'state loop backing changed'
+        losetup -d "$loop" || [ ! -e "$backing" ] || fail 'cannot detach state loop; no export occurred'
+    fi
+    fi
+    bootmark usb-card-unmount-begin
+    umount "$CARD_MOUNT" || fail 'card is busy; no export occurred'
+    bootmark usb-card-unmount-returned
+    bootmark usb-ownership-first-begin
+    assert_detached
+    bootmark usb-ownership-first-returned
+    flush_card_caches || fail 'card caches could not be flushed; no export occurred'
+    phase detached
+    bootmark usb-gadget-reconfigure-begin
+    # Composite setup preserves RNDIS but necessarily re-enumerates the gadget.
+    printf '\n' > "$gadget/UDC"
+    mkdir "$gadget/functions/mass_storage.q2card"
+    lun=$gadget/functions/mass_storage.q2card/lun.0
+    printf '1\n' > "$lun/removable"
+    printf '0\n' > "$lun/nofua"
+    printf '0\n' > "$lun/ro"
+    printf '0\n' > "$lun/cdrom"
+    ln -s "$gadget/functions/mass_storage.q2card" "$gadget/configs/c.1/mass_storage.q2card"
+    bootmark usb-ownership-second-begin
+    assert_detached
+    bootmark usb-ownership-second-returned
+    # Return requires genuine eject or confirmed physical VBUS loss followed
+    # by synchronous UDC teardown before this owned backing is closed.
+    phase armed
+    printf '%s\n' "$CARD" > "$lun/file"
+    printf '%s\n' "$udc" > "$gadget/UDC" || fail 'USB bind failed; card stays detached; use retry-export'
+    phase exported
+    bootmark usb-gadget-reconfigure-returned
+    echo 'Card belongs to USB host. Eject it in the host OS before q2-usb-storage stop.'
+}
+
+retry_export() {
+    load_session
+    case "$(value phase)" in armed|exported) ;; *) fail 'no armed export to retry' ;; esac
+    [ "$(cat "$lun/file")" = "$CARD" ] || fail 'backing file differs or host already ejected; use stop'
+    [ -z "$(cat "$gadget/UDC")" ] || fail 'USB gadget is already bound'
+    assert_detached
+    printf '%s\n' "$udc" > "$gadget/UDC"
+    phase exported
+}
+
+restore_mounts() {
+    current=$(mounted "$CARD_MOUNT")
+    if [ -z "$current" ]; then
+        flush_card_caches || fail 'card caches could not be flushed; card stays detached'
+        rm -f "$RUN/card-readonly"
+        options=$(card_mount_options)
+        mount -t exfat -o "$options" "$PART" "$CARD_MOUNT" || fail 'card remount failed; no format/repair attempted'
+        [ ! -e "$RUN/card-readonly" ] || echo 'q2-usb-storage: card was not cleanly unmounted and its check failed; mounted read-only; repair it on a computer' >&2
+    else
+        [ "$current" = "$PART exfat" ] || fail 'unexpected card mount during return'
+    fi
+    if [ "$profile" = trial ]; then
+    [ -f "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] || fail 'known state image is missing/replaced; refusing another layout'
+    current=$(mounted "$STATE_MOUNT")
+    if [ -z "$current" ]; then
+        if [ -e "$SYS/class/block/$loop_name/loop/backing_file" ]; then
+            [ "$(cat "$SYS/class/block/$loop_name/loop/backing_file")" = "$STATE_FILE" ] || fail 'saved loop is now owned by something else'
+        else
+            losetup "$loop" "$STATE_FILE" || fail 'state loop attach failed'
+        fi
+        mount -t ext4 -o nosuid,nodev "$loop" "$STATE_MOUNT" || fail 'state remount failed; no format/repair attempted'
+    else
+        [ "$current" = "$loop ext4" ] || fail 'unexpected state mount during return'
+    fi
+    else
+        validate_internal_state
+    fi
+    validate_layout
+    if [ "$DEFER_RESTART" = 1 ]; then
+        [ "$profile" = internal ] || fail 'deferred restart requires installed internal state'
+        "$INSTALLED_SERVICE" hold || fail 'cannot hold installed player for setup'
+    fi
+    printf '%s\n' ready > "$RUN/state-status"
+    phase local-ready
+    if [ "$(value player)" = installed ]; then
+        if [ "$DEFER_RESTART" = 1 ]; then
+            echo 'Card/state are local. Player held for setup; use q2-installed-services resume when ready.'
+        else
+            status_stop
+            "$INSTALLED_SERVICE" start || fail 'card is local, but installed player restart failed'
+        fi
+    elif [ "$(value player)" = service ]; then
+        status_stop
+        "$SERVICES/S80q2-player" start || fail 'card is local, but player restart failed'
+    else
+        status_stop
+        echo 'Card/state are local again. Restart the manual RAM player explicitly.'
+    fi
+    rm -f "$SESSION/phase" "$SESSION/cid" "$SESSION/loop" "$SESSION/gadget" "$SESSION/udc" "$SESSION/player" "$SESSION/profile" "$SESSION/internal"
+    rmdir "$SESSION"
+}
+
+stop() {
+    bootmark usb-return-requested
+    load_session
+    if [ -e "$lun/file" ]; then
+        backing=$(cat "$lun/file") || fail 'cannot inspect owned LUN backing'
+        case "$backing" in ''|"$CARD") ;; *) fail 'owned LUN backing changed; refusing foreign media' ;; esac
+        if [ -n "$backing" ] && ! confirmed_disconnect; then
+            # Expected transient/refusal, not a failed return to latch forever.
+            echo 'q2-usb-storage: host has not ejected and physical VBUS loss is not confirmed; local mounts remain disabled' >&2
+            exit 75
+        fi
+        bound=$(cat "$gadget/UDC") || fail 'cannot inspect gadget binding'
+        [ -z "$bound" ] || [ "$bound" = "$udc" ] || fail 'gadget controller changed'
+        # configfs UDC unregistration waits for fsg_unbind(): pending transfers
+        # are cancelled/drained before the owned LUN's file semaphore is taken.
+        bootmark usb-gadget-unbind-begin
+        unbind_gadget || fail 'USB gadget could not quiesce; card remains detached'
+        bootmark usb-gadget-unbind-returned
+        [ -z "$(cat "$gadget/UDC")" ] || fail 'USB gadget remains bound'
+        if [ -n "$backing" ]; then
+            bootmark usb-lun-close-begin
+            close_lun || fail 'owned LUN could not close; card remains detached'
+            bootmark usb-lun-close-returned
+            [ -z "$(cat "$lun/file")" ] || fail 'owned LUN still has backing'
+        fi
+        bootmark usb-return-sync-begin
+        sync || fail 'received card writes could not synchronize'
+        bootmark usb-return-sync-returned
+        phase returning
+        rm -f "$gadget/configs/c.1/mass_storage.q2card" || fail 'owned LUN unlink failed'
+        rmdir "$gadget/functions/mass_storage.q2card" || fail 'owned LUN removal failed'
+        assert_detached
+    fi
+    # Reconnect may occur during teardown. Only RNDIS is rebound, after the LUN
+    # is gone, so the host cannot race local filesystem ownership on that cable.
+    if [ -z "$(cat "$gadget/UDC")" ]; then printf '%s\n' "$udc" > "$gadget/UDC"; fi
+    phase returning
+    bootmark usb-restore-mounts-begin
+    restore_mounts
+    bootmark usb-restore-mounts-returned
+}
+
+status() {
+    if [ ! -d "$SESSION" ]; then echo 'No USB storage session (local ownership).'; return; fi
+    load_session
+    echo "Phase: $(value phase)"
+    if [ -e "$lun/file" ] && [ -n "$(cat "$lun/file")" ]; then
+        echo 'Host owns card; safe eject or confirmed physical USB unplug permits return.'
+    else
+        echo 'No host backing file; stop can attempt the known-layout return.'
+    fi
+}
+
+main() {
+    [ "$(id -u)" = 0 ] || fail 'root is required'
+    if [ "$#" = 2 ]; then
+        [ "$1" = stop ] && [ "$2" = --defer-restart ] || fail 'only stop accepts --defer-restart'
+        DEFER_RESTART=1
+    else
+        [ "$#" = 1 ] || fail 'usage: q2-usb-storage start|status|stop [--defer-restart]|retry-export|disconnected'
+    fi
+    case "$1" in start|status|stop|retry-export|disconnected) ;; *) fail 'unknown command' ;; esac
+    umask 077
+    mkdir -p "$RUN"
+    mkdir "$LOCK" 2>/dev/null || { echo 'q2-usb-storage: another operation or stale lock exists; inspect before recovery' >&2; exit 75; }
+    trap 'rmdir "$LOCK"' EXIT
+    trap 'exit 1' HUP INT TERM
+    case "$1" in start) start ;; stop) stop ;; status) status ;; retry-export) retry_export ;; disconnected) confirmed_disconnect || exit 75 ;; esac
+}
+# Source-only mode lets host tests replace I/O at function boundaries. It cannot
+# authorize exports or change paths in an installed command invocation.
+if [ "${Q2_STORAGE_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

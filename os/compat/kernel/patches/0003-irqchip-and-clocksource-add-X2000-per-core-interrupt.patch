@@ -1,0 +1,481 @@
+From bbe72bd52325fb0e70f1fc71caf19ed5f845d498 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:29:14 -0500
+Subject: [PATCH 3/5] irqchip and clocksource: add X2000 per-core interrupt and
+ OST support
+
+Use the Q2 vendor kernel register layout: 0x100 per-core stride for INTC
+and OST, a global 64-bit counter, and core-local timer interrupts on IP4.
+Configure per-CPU IRQ descriptors before requesting per-CPU IRQs.
+Validated with two CPUs, clocksource selection and userspace timer tests
+in the Q2 emulator; this is not hardware validation.
+---
+ drivers/clocksource/Kconfig             |  11 ++
+ drivers/clocksource/Makefile            |   1 +
+ drivers/clocksource/ingenic-x2000-ost.c | 209 ++++++++++++++++++++++++
+ drivers/irqchip/Kconfig                 |   6 +
+ drivers/irqchip/Makefile                |   1 +
+ drivers/irqchip/irq-ingenic-x2000.c     | 162 ++++++++++++++++++
+ include/linux/cpuhotplug.h              |   1 +
+ 7 files changed, 391 insertions(+)
+ create mode 100644 drivers/clocksource/ingenic-x2000-ost.c
+ create mode 100644 drivers/irqchip/irq-ingenic-x2000.c
+
+diff --git a/drivers/clocksource/Kconfig b/drivers/clocksource/Kconfig
+index d9c76dd44..4057e8b1b 100644
+--- a/drivers/clocksource/Kconfig
++++ b/drivers/clocksource/Kconfig
+@@ -719,6 +719,17 @@ config INGENIC_TIMER
+ 	help
+ 	  Support for the timer/counter unit of the Ingenic JZ SoCs.
+ 
++config INGENIC_X2000_OST
++	bool "Clocksource and clockevents for the Ingenic X2000 OST"
++	default MACH_X2000
++	depends on MIPS || COMPILE_TEST
++	depends on COMMON_CLK
++	select TIMER_OF
++	select CLKSRC_MMIO
++	help
++	  Support for the global 64-bit and per-core 32-bit operating system
++	  timers of the Ingenic X2000.
++
+ config INGENIC_SYSOST
+ 	bool "Clocksource/timer using the SYSOST in Ingenic X SoCs"
+ 	depends on MIPS || COMPILE_TEST
+diff --git a/drivers/clocksource/Makefile b/drivers/clocksource/Makefile
+index b46376af6..481db8072 100644
+--- a/drivers/clocksource/Makefile
++++ b/drivers/clocksource/Makefile
+@@ -79,6 +79,7 @@ obj-$(CONFIG_TIMER_IMX_SYS_CTR)		+= timer-imx-sysctr.o
+ obj-$(CONFIG_ASM9260_TIMER)		+= asm9260_timer.o
+ obj-$(CONFIG_INGENIC_OST)		+= ingenic-ost.o
+ obj-$(CONFIG_INGENIC_SYSOST)	+= ingenic-sysost.o
++obj-$(CONFIG_INGENIC_X2000_OST)	+= ingenic-x2000-ost.o
+ obj-$(CONFIG_INGENIC_TIMER)		+= ingenic-timer.o
+ obj-$(CONFIG_CLKSRC_ST_LPC)		+= clksrc_st_lpc.o
+ obj-$(CONFIG_X86_NUMACHIP)		+= numachip.o
+diff --git a/drivers/clocksource/ingenic-x2000-ost.c b/drivers/clocksource/ingenic-x2000-ost.c
+new file mode 100644
+index 000000000..10f32dadc
+--- /dev/null
++++ b/drivers/clocksource/ingenic-x2000-ost.c
+@@ -0,0 +1,209 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Operating system timers (OST) of the Ingenic X2000.
++ *
++ * The global OST (first register range) is a free-running 64-bit counter,
++ * used as clocksource and sched_clock. Each core has its own 32-bit OST
++ * (second register range, 0x100 apart) that counts up to a compare value,
++ * flags it and restarts from zero; its interrupt reaches only that core,
++ * on CP0 IP4. Both count the OST clock (EXCLK, 24 MHz) undivided.
++ */
++
++#include <linux/clk.h>
++#include <linux/clockchips.h>
++#include <linux/clocksource.h>
++#include <linux/cpuhotplug.h>
++#include <linux/interrupt.h>
++#include <linux/irq.h>
++#include <linux/io.h>
++#include <linux/of_address.h>
++#include <linux/of_irq.h>
++#include <linux/percpu.h>
++#include <linux/sched_clock.h>
++
++/* global OST */
++#define GOST_CCR		0x00	/* clock control: prescale */
++#define GOST_ER			0x04	/* bit 0: run */
++#define GOST_CR			0x08	/* bit 0: clear */
++#define GOST_CNTH		0x0c
++#define GOST_CNTL		0x10
++
++/* per-core OST, at 0x100 * cpu */
++#define COST_STRIDE		0x100
++#define COST_CCR		0x00
++#define COST_ER			0x04	/* bit 0: run */
++#define COST_CR			0x08	/* bit 0: clear the counter */
++#define COST_FR			0x0c	/* bit 0: compare matched */
++#define COST_MR			0x10	/* bit 0: mask the interrupt */
++#define COST_DFR		0x14	/* compare value */
++
++struct x2000_ost_cpu {
++	struct clock_event_device cevt;
++	void __iomem *base;
++	char name[16];
++};
++
++static void __iomem *gost;
++static void __iomem *cost;
++static unsigned long ost_rate;
++static int ost_irq;
++static DEFINE_PER_CPU(struct x2000_ost_cpu, x2000_ost_cpu);
++
++static u64 notrace x2000_ost_read(void)
++{
++	u32 hi, lo;
++
++	do {
++		hi = readl(gost + GOST_CNTH);
++		lo = readl(gost + GOST_CNTL);
++	} while (hi != readl(gost + GOST_CNTH));
++
++	return (u64)hi << 32 | lo;
++}
++
++static u64 x2000_ost_cs_read(struct clocksource *cs)
++{
++	return x2000_ost_read();
++}
++
++static struct clocksource x2000_ost_cs = {
++	.name	= "x2000-ost",
++	.rating	= 400,
++	.read	= x2000_ost_cs_read,
++	.mask	= CLOCKSOURCE_MASK(64),
++	.flags	= CLOCK_SOURCE_IS_CONTINUOUS,
++};
++
++static struct x2000_ost_cpu *to_ost_cpu(struct clock_event_device *evt)
++{
++	return container_of(evt, struct x2000_ost_cpu, cevt);
++}
++
++static int x2000_ost_shutdown(struct clock_event_device *evt)
++{
++	writel(0, to_ost_cpu(evt)->base + COST_ER);
++
++	return 0;
++}
++
++static void x2000_ost_start(struct x2000_ost_cpu *t, u32 ticks)
++{
++	writel(0, t->base + COST_ER);
++	writel(ticks, t->base + COST_DFR);
++	writel(1, t->base + COST_CR);
++	writel(0, t->base + COST_FR);
++	writel(1, t->base + COST_ER);
++}
++
++static int x2000_ost_set_next_event(unsigned long ticks,
++				    struct clock_event_device *evt)
++{
++	x2000_ost_start(to_ost_cpu(evt), ticks);
++
++	return 0;
++}
++
++static int x2000_ost_set_periodic(struct clock_event_device *evt)
++{
++	x2000_ost_start(to_ost_cpu(evt), DIV_ROUND_CLOSEST(ost_rate, HZ));
++
++	return 0;
++}
++
++static irqreturn_t x2000_ost_irq(int irq, void *dev_id)
++{
++	struct x2000_ost_cpu *t = this_cpu_ptr(&x2000_ost_cpu);
++
++	if (!readl(t->base + COST_FR))
++		return IRQ_NONE;
++	writel(0, t->base + COST_FR);
++	if (clockevent_state_oneshot(&t->cevt))
++		writel(0, t->base + COST_ER);
++	t->cevt.event_handler(&t->cevt);
++
++	return IRQ_HANDLED;
++}
++
++static int x2000_ost_cpu_starting(unsigned int cpu)
++{
++	struct x2000_ost_cpu *t = per_cpu_ptr(&x2000_ost_cpu, cpu);
++
++	t->base = cost + COST_STRIDE * cpu;
++	writel(0, t->base + COST_ER);
++	writel(0, t->base + COST_CCR);
++	writel(0, t->base + COST_FR);
++	writel(0, t->base + COST_MR);
++
++	snprintf(t->name, sizeof(t->name), "x2000-ost%u", cpu);
++	t->cevt.name = t->name;
++	t->cevt.features = CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_PERIODIC;
++	t->cevt.rating = 400;
++	t->cevt.irq = ost_irq;
++	t->cevt.cpumask = cpumask_of(cpu);
++	t->cevt.set_state_shutdown = x2000_ost_shutdown;
++	t->cevt.set_state_periodic = x2000_ost_set_periodic;
++	t->cevt.set_state_oneshot = x2000_ost_shutdown;
++	t->cevt.set_next_event = x2000_ost_set_next_event;
++	clockevents_config_and_register(&t->cevt, ost_rate, 4, 0xffffffff);
++	enable_percpu_irq(ost_irq, IRQ_TYPE_NONE);
++
++	return 0;
++}
++
++static int x2000_ost_cpu_dying(unsigned int cpu)
++{
++	struct x2000_ost_cpu *t = per_cpu_ptr(&x2000_ost_cpu, cpu);
++
++	disable_percpu_irq(ost_irq);
++	writel(0, t->base + COST_ER);
++	writel(1, t->base + COST_MR);
++
++	return 0;
++}
++
++static int __init x2000_ost_init(struct device_node *np)
++{
++	struct clk *clk;
++	int err;
++
++	gost = of_iomap(np, 0);
++	cost = of_iomap(np, 1);
++	if (!gost || !cost) {
++		pr_err("x2000-ost: cannot map registers\n");
++		return -ENXIO;
++	}
++
++	clk = of_clk_get_by_name(np, "ost");
++	if (IS_ERR(clk))
++		return PTR_ERR(clk);
++	err = clk_prepare_enable(clk);
++	if (err)
++		return err;
++	ost_rate = clk_get_rate(clk);
++
++	ost_irq = irq_of_parse_and_map(np, 0);
++	if (!ost_irq)
++		return -EINVAL;
++	err = irq_set_percpu_devid(ost_irq);
++	if (err)
++		return err;
++	irq_set_handler(ost_irq, handle_percpu_devid_irq);
++
++	writel(0, gost + GOST_CCR);
++	writel(1, gost + GOST_CR);
++	writel(1, gost + GOST_ER);
++	err = clocksource_register_hz(&x2000_ost_cs, ost_rate);
++	if (err)
++		return err;
++	sched_clock_register(x2000_ost_read, 64, ost_rate);
++
++	err = request_percpu_irq(ost_irq, x2000_ost_irq, "x2000-ost",
++				 &x2000_ost_cpu);
++	if (err)
++		return err;
++
++	return cpuhp_setup_state(CPUHP_AP_INGENIC_X2000_OST_STARTING,
++				 "clockevents/ingenic/x2000-ost:starting",
++				 x2000_ost_cpu_starting, x2000_ost_cpu_dying);
++}
++TIMER_OF_DECLARE(x2000_ost, "ingenic,x2000-ost", x2000_ost_init);
+diff --git a/drivers/irqchip/Kconfig b/drivers/irqchip/Kconfig
+index 20b77fbc5..583eb94b7 100644
+--- a/drivers/irqchip/Kconfig
++++ b/drivers/irqchip/Kconfig
+@@ -417,6 +417,12 @@ config INGENIC_IRQ
+ 	depends on MACH_INGENIC
+ 	default y
+ 
++config INGENIC_X2000_IRQ
++	bool
++	depends on MACH_INGENIC || COMPILE_TEST
++	default MACH_X2000
++	select IRQ_DOMAIN
++
+ config INGENIC_TCU_IRQ
+ 	bool "Ingenic JZ47xx TCU interrupt controller"
+ 	default MACH_INGENIC
+diff --git a/drivers/irqchip/Makefile b/drivers/irqchip/Makefile
+index ab33cccd8..f4db5f082 100644
+--- a/drivers/irqchip/Makefile
++++ b/drivers/irqchip/Makefile
+@@ -77,6 +77,7 @@ obj-$(CONFIG_ARCH_DIGICOLOR)		+= irq-digicolor.o
+ obj-$(CONFIG_ARCH_SA1100)		+= irq-sa11x0.o
+ obj-$(CONFIG_INGENIC_IRQ)		+= irq-ingenic.o
+ obj-$(CONFIG_INGENIC_TCU_IRQ)		+= irq-ingenic-tcu.o
++obj-$(CONFIG_INGENIC_X2000_IRQ)		+= irq-ingenic-x2000.o
+ obj-$(CONFIG_IMX_GPCV2)			+= irq-imx-gpcv2.o
+ obj-$(CONFIG_PIC32_EVIC)		+= irq-pic32-evic.o
+ obj-$(CONFIG_MSCC_OCELOT_IRQ)		+= irq-mscc-ocelot.o
+diff --git a/drivers/irqchip/irq-ingenic-x2000.c b/drivers/irqchip/irq-ingenic-x2000.c
+new file mode 100644
+index 000000000..c90747e49
+--- /dev/null
++++ b/drivers/irqchip/irq-ingenic-x2000.c
+@@ -0,0 +1,162 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Interrupt controller of the Ingenic X2000.
++ *
++ * The 64 peripheral interrupts have one register bank per core, at
++ * 0x100 * cpu. Each bank holds two groups of 32 sources (at 0x00 and 0x20)
++ * with status (+0x00), mask (+0x04), mask set (+0x08), mask clear (+0x0c)
++ * and pending (+0x10) registers; pending is the status not masked in that
++ * bank. A core sees CP0 IP2 while its bank has pending interrupts.
++ *
++ * An interrupt is unmasked in the bank of exactly one core, which is how
++ * its affinity is set.
++ */
++
++#include <linux/bitops.h>
++#include <linux/cpumask.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/irqchip.h>
++#include <linux/irqchip/chained_irq.h>
++#include <linux/irqdomain.h>
++#include <linux/of_address.h>
++#include <linux/of_irq.h>
++#include <linux/smp.h>
++
++#define X2000_INTC_NIRQ		64
++#define X2000_INTC_BANK		0x100
++
++#define INTC_MASK		0x04
++#define INTC_MASK_SET		0x08
++#define INTC_MASK_CLR		0x0c
++#define INTC_PENDING		0x10
++#define INTC_GROUP(hw)		(((hw) / 32) * 0x20)
++
++struct x2000_intc {
++	void __iomem *base;
++	struct irq_domain *domain;
++	/* core that takes each interrupt */
++	u8 target[X2000_INTC_NIRQ];
++};
++
++static struct x2000_intc x2000_intc;
++
++static void __iomem *bank_reg(unsigned int cpu, irq_hw_number_t hw,
++			      unsigned int reg)
++{
++	return x2000_intc.base + X2000_INTC_BANK * cpu + INTC_GROUP(hw) + reg;
++}
++
++static void x2000_intc_mask(struct irq_data *d)
++{
++	irq_hw_number_t hw = irqd_to_hwirq(d);
++
++	writel(BIT(hw % 32), bank_reg(x2000_intc.target[hw], hw, INTC_MASK_SET));
++}
++
++static void x2000_intc_unmask(struct irq_data *d)
++{
++	irq_hw_number_t hw = irqd_to_hwirq(d);
++
++	writel(BIT(hw % 32), bank_reg(x2000_intc.target[hw], hw, INTC_MASK_CLR));
++}
++
++static int x2000_intc_set_affinity(struct irq_data *d,
++				   const struct cpumask *dest, bool force)
++{
++	irq_hw_number_t hw = irqd_to_hwirq(d);
++	unsigned int cpu, old = x2000_intc.target[hw];
++
++	cpu = force ? cpumask_first(dest) : cpumask_first_and(dest, cpu_online_mask);
++	if (cpu >= nr_cpu_ids)
++		return -EINVAL;
++
++	if (cpu != old) {
++		bool enabled = !irqd_irq_masked(d);
++
++		writel(BIT(hw % 32), bank_reg(old, hw, INTC_MASK_SET));
++		x2000_intc.target[hw] = cpu;
++		if (enabled)
++			writel(BIT(hw % 32), bank_reg(cpu, hw, INTC_MASK_CLR));
++	}
++	irq_data_update_effective_affinity(d, cpumask_of(cpu));
++
++	return IRQ_SET_MASK_OK_DONE;
++}
++
++static struct irq_chip x2000_intc_chip = {
++	.name			= "x2000-intc",
++	.irq_mask		= x2000_intc_mask,
++	.irq_unmask		= x2000_intc_unmask,
++	.irq_set_affinity	= x2000_intc_set_affinity,
++	.flags			= IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_SKIP_SET_WAKE,
++};
++
++static void x2000_intc_cascade(struct irq_desc *desc)
++{
++	struct irq_chip *chip = irq_desc_get_chip(desc);
++	unsigned int cpu = smp_processor_id();
++
++	chained_irq_enter(chip, desc);
++	for (int group = 0; group < X2000_INTC_NIRQ / 32; group++) {
++		unsigned long pending = readl(bank_reg(cpu, group * 32,
++						       INTC_PENDING));
++		unsigned int bit;
++
++		for_each_set_bit(bit, &pending, 32)
++			generic_handle_domain_irq(x2000_intc.domain,
++						  group * 32 + bit);
++	}
++	chained_irq_exit(chip, desc);
++}
++
++static int x2000_intc_map(struct irq_domain *d, unsigned int irq,
++			  irq_hw_number_t hw)
++{
++	irq_set_chip_and_handler(irq, &x2000_intc_chip, handle_level_irq);
++	irq_set_status_flags(irq, IRQ_LEVEL);
++	irq_data_update_effective_affinity(irq_get_irq_data(irq),
++					   cpumask_of(0));
++
++	return 0;
++}
++
++static const struct irq_domain_ops x2000_intc_domain_ops = {
++	.map	= x2000_intc_map,
++	.xlate	= irq_domain_xlate_onecell,
++};
++
++static int __init x2000_intc_of_init(struct device_node *np,
++				     struct device_node *parent)
++{
++	unsigned int parent_irq;
++
++	x2000_intc.base = of_iomap(np, 0);
++	if (!x2000_intc.base)
++		return -ENOMEM;
++
++	/* Everything masked on every core. */
++	for (unsigned int cpu = 0; cpu < num_possible_cpus(); cpu++)
++		for (int hw = 0; hw < X2000_INTC_NIRQ; hw += 32)
++			writel(~0u, bank_reg(cpu, hw, INTC_MASK_SET));
++
++	parent_irq = irq_of_parse_and_map(np, 0);
++	if (!parent_irq)
++		goto err_unmap;
++
++	x2000_intc.domain = irq_domain_create_linear(of_fwnode_handle(np),
++						     X2000_INTC_NIRQ,
++						     &x2000_intc_domain_ops,
++						     NULL);
++	if (!x2000_intc.domain)
++		goto err_unmap;
++
++	irq_set_chained_handler(parent_irq, x2000_intc_cascade);
++
++	return 0;
++
++err_unmap:
++	iounmap(x2000_intc.base);
++	return -EINVAL;
++}
++IRQCHIP_DECLARE(x2000_intc, "ingenic,x2000-intc", x2000_intc_of_init);
+diff --git a/include/linux/cpuhotplug.h b/include/linux/cpuhotplug.h
+index feb32949a..9758c3a71 100644
+--- a/include/linux/cpuhotplug.h
++++ b/include/linux/cpuhotplug.h
+@@ -169,6 +169,7 @@ enum cpuhp_state {
+ 	CPUHP_AP_ARMADA_TIMER_STARTING,
+ 	CPUHP_AP_LOONGARCH_ARCH_TIMER_STARTING,
+ 	CPUHP_AP_MIPS_GIC_TIMER_STARTING,
++	CPUHP_AP_INGENIC_X2000_OST_STARTING,
+ 	CPUHP_AP_ARC_TIMER_STARTING,
+ 	CPUHP_AP_REALTEK_TIMER_STARTING,
+ 	CPUHP_AP_RISCV_TIMER_STARTING,

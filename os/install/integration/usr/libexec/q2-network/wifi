@@ -1,0 +1,198 @@
+#!/bin/sh
+# Mainline-owned Wi-Fi only. Never imports stock /mnt/data credentials.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RUN=/run/q2-network
+STATE=/state/network
+SYS=/sys
+PROC=/proc
+UPTIME=/proc/uptime
+IFACE=wlan0
+CTRL=/run/wpa_supplicant
+LOG=/run/log
+STATE_STATUS=/run/q2/state-status
+WPA=/usr/sbin/wpa_supplicant
+umask 077
+fail() { echo "q2-wifi: $*" >&2; exit 1; }
+bootmark() {
+    [ -d "$RUN" ] || return 0
+    [ ! -L "$RUN/boot-times" ] && { [ ! -e "$RUN/boot-times" ] || { [ -f "$RUN/boot-times" ] && [ "$(wc -c < "$RUN/boot-times")" -lt 65408 ]; }; } || return 0
+    read -r uptime idle < "$UPTIME" || return 0
+    case "$uptime" in *.*) ;; *) return 0 ;; esac
+    case "${uptime%.*}:${uptime#*.}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+    printf '%s %s\n' "$uptime" "$1" >> "$RUN/boot-times" 2>/dev/null || :
+}
+owned_pid() {
+    file=$1 expected=$2
+    [ -f "$file" ] || return 1
+    pid=$(cat "$file")
+    case "$pid" in ''|*[!0-9]*) fail 'invalid owned PID file' ;; esac
+    [ "$pid" -gt 1 ] || fail 'invalid owned PID'
+    kill -0 "$pid" 2>/dev/null || { rm -f "$file"; return 1; }
+    [ "$(cat "$PROC/$pid/comm")" = "$expected" ] || fail 'PID is not the expected network process'
+}
+stop_owned() {
+    file=$1 expected=$2
+    if owned_pid "$file" "$expected"; then
+        kill -TERM "$pid"
+        n=0
+        while kill -0 "$pid" 2>/dev/null; do
+            [ "$n" -lt 10 ] || fail 'network process did not stop'
+            sleep 1; n=$((n+1))
+        done
+        rm -f "$file"
+    fi
+}
+# The Wi-Fi chip's SDIO host (MSC1). Never MSC2 (microSD).
+MSC1=13460000.mmc
+msc1_driver() {
+    for d in sdhci-ingenic-x2000 sdhci-ingenic; do
+        [ ! -d "$SYS/bus/platform/drivers/$d" ] || { echo "$SYS/bus/platform/drivers/$d"; return 0; }
+    done
+    return 1
+}
+# Power the chip off: unbinding MSC1 removes the SDIO card and lets the host's
+# power sequence drop the chip's enable lines. With the interface merely down
+# the 8733bs still draws 39 mW (docs/validation/quick-experiments.md,
+# quick-wifi-chip-01). An unknown host driver is left alone.
+power_off() {
+    [ -e "$SYS/bus/platform/devices/$MSC1/driver" ] || return 0
+    driver=$(readlink -f "$SYS/bus/platform/devices/$MSC1/driver") || return 0
+    case "${driver##*/}" in sdhci-ingenic|sdhci-ingenic-x2000) ;; *) return 0 ;; esac
+    bootmark wlan-power-off
+    printf '%s\n' "$MSC1" > "$driver/unbind"
+}
+# Undo power_off before the interface is needed. Sets powered_on=1 when it
+# bound the host: the card then enumerates asynchronously, so the compat
+# reprobe below must not unbind it again.
+powered_on=0
+power_on() {
+    [ ! -e "$SYS/bus/platform/devices/$MSC1/driver" ] || return 0
+    [ -e "$SYS/bus/platform/devices/$MSC1" ] || return 0
+    driver=$(msc1_driver) || fail 'Wi-Fi host driver is absent'
+    bootmark wlan-power-on
+    printf '%s\n' "$MSC1" > "$driver/bind" 2>/dev/null || fail 'Wi-Fi host bind failed'
+    powered_on=1
+}
+# Fast reassociation: the channel of the last association, recorded by `down`
+# while still linked, limits only the supplicant's first scan after start
+# (initial_freq_list, a -I overlay). Every later scan is full-band, so a moved
+# or absent AP falls back by itself. The full first scan took about 4.1 s of
+# the 6.5 s to an address (docs/validation/quick-experiments.md, wifi-trace-01).
+record_channel() {
+    [ "$(cat "$SYS/class/net/$IFACE/carrier" 2>/dev/null || echo 0)" = 1 ] || return 0
+    ch=$(sed -n 's/^cur_channel=\([0-9]*\),.*/\1/p' "$PROC/net/rtl8733bs/$IFACE/ap_info" 2>/dev/null | head -1)
+    case "$ch" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$ch" -ge 1 ] && [ "$ch" -le 13 ]; then freq=$((2407 + 5 * ch))
+    elif [ "$ch" = 14 ]; then freq=2484
+    elif [ "$ch" -ge 32 ] && [ "$ch" -le 177 ]; then freq=$((5000 + 5 * ch))
+    else return 0; fi
+    printf '%s\n' "$freq" > "$RUN/last-freq"
+}
+initial_overlay() {
+    freq=$(cat "$RUN/last-freq" 2>/dev/null) || return 1
+    case "$freq" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$freq" -ge 2412 ] && [ "$freq" -le 5885 ] || return 1
+    printf 'initial_freq_list=%s\n' "$freq" > "$RUN/initial.conf"
+}
+prepare_interface() {
+    power_on
+    if [ ! -d "$SYS/class/net/$IFACE" ]; then
+        bootmark wlan-module-begin
+        modprobe 8733bs
+        bootmark wlan-module-returned
+        # Compatibility with kernels predating the Q2 power-sequence provider:
+        # if MSC1 scanned before board bring-up enabled the combo rails, reprobe
+        # it once. New kernels defer that initial scan in the MMC core. Never
+        # touch MSC2 (microSD), and add no delay to an already-ready interface.
+        if [ ! -d "$SYS/class/net/$IFACE" ] && [ "$powered_on" = 0 ] &&
+           [ ! -e "$SYS/bus/platform/devices/13460000.mmc/of_node/mmc-pwrseq" ]; then
+            driver=$(readlink -f "$SYS/bus/platform/devices/13460000.mmc/driver") || fail 'Wi-Fi host driver is absent'
+            case "${driver##*/}" in sdhci-ingenic|sdhci-ingenic-x2000) ;; *) fail 'unexpected Wi-Fi host driver' ;; esac
+            printf '13460000.mmc\n' > "$driver/unbind"
+            printf '13460000.mmc\n' > "$driver/bind"
+        fi
+        n=0
+        while [ ! -d "$SYS/class/net/$IFACE" ]; do
+            [ "$n" -lt 10 ] || fail 'Wi-Fi interface did not enumerate'
+            sleep 1; n=$((n+1))
+        done
+    fi
+    bootmark wlan-driver-ready
+    bootmark wlan-link-up-begin
+    ip link set "$IFACE" up
+    bootmark wlan-interface-ready
+}
+up() {
+    [ "$(cat "$STATE_STATUS")" = ready ] || fail 'internal state is unavailable'
+    if owned_pid "$RUN/wpa.pid" wpa_supplicant; then return; fi
+    [ ! -S "$CTRL/$IFACE" ] || fail 'unowned supplicant control socket; refusing to replace it'
+    mkdir -p "$STATE"
+    if [ ! -e "$STATE/wpa.conf" ]; then
+        printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n' > "$STATE/wpa.conf.new"
+        chmod 600 "$STATE/wpa.conf.new"
+        mv "$STATE/wpa.conf.new" "$STATE/wpa.conf"
+    fi
+    bootmark wlan-up-begin
+    prepare_interface
+    bootmark wlan-supplicant-begin
+    # A SAVE_CONFIG may have copied the overlay's value into the saved file.
+    if grep -q '^initial_freq_list=' "$STATE/wpa.conf" 2>/dev/null; then
+        sed -i '/^initial_freq_list=/d' "$STATE/wpa.conf"
+    fi
+    # The overlay marks a hinted start for the app (net/kick.rs): never stale.
+    rm -f "$RUN/initial.conf"
+    if initial_overlay; then
+        "$WPA" -B -P "$RUN/wpa.pid" -D nl80211 -i "$IFACE" -c "$STATE/wpa.conf" -I "$RUN/initial.conf" >> "$LOG/wifi.log" 2>&1
+    else
+        "$WPA" -B -P "$RUN/wpa.pid" -D nl80211 -i "$IFACE" -c "$STATE/wpa.conf" >> "$LOG/wifi.log" 2>&1
+    fi
+    # -B returns before the daemon writes its pid file: hold the lock until it
+    # does, or the next `up` (the player's, after root-init's) finds an
+    # unowned control socket and fails.
+    n=0
+    while [ ! -s "$RUN/wpa.pid" ] && [ "$n" -lt 30 ]; do sleep .1; n=$((n+1)); done
+    bootmark wlan-supplicant-started
+}
+dhcp() {
+    owned_pid "$RUN/wpa.pid" wpa_supplicant || fail 'owned supplicant is not running'
+    if owned_pid "$RUN/dhcp.pid" udhcpc; then return; fi
+    bootmark wlan-dhcp-begin
+    udhcpc -i "$IFACE" -b -p "$RUN/dhcp.pid" -s /usr/libexec/q2-network/dhcp -O 114 -t 5 -T 2 >> "$LOG/wifi.log" 2>&1
+}
+# The supplicant joined a different saved network: the current lease, address
+# and default route belong to the old one and cannot carry traffic here. Stop
+# the owned client, drop the address and acquire a new lease. (Reconnecting to
+# the same network keeps using `dhcp`, which leaves a running client alone.)
+renew() {
+    owned_pid "$RUN/wpa.pid" wpa_supplicant || fail 'owned supplicant is not running'
+    stop_owned "$RUN/dhcp.pid" udhcpc
+    [ ! -d "$SYS/class/net/$IFACE" ] || ip -4 addr flush dev "$IFACE"
+    bootmark wlan-dhcp-renew-begin
+    udhcpc -i "$IFACE" -b -p "$RUN/dhcp.pid" -s /usr/libexec/q2-network/dhcp -O 114 -t 5 -T 2 >> "$LOG/wifi.log" 2>&1
+}
+down() {
+    record_channel
+    stop_owned "$RUN/dhcp.pid" udhcpc
+    stop_owned "$RUN/wpa.pid" wpa_supplicant
+    if [ -d "$SYS/class/net/$IFACE" ]; then
+        ip -4 addr flush dev "$IFACE"
+        ip link set "$IFACE" down
+    fi
+    power_off
+}
+main() {
+    mkdir -p "$RUN" "$CTRL" "$LOG"
+    [ "$#" = 1 ] || fail 'usage: wifi up|dhcp|renew|down'
+    case "$1" in up|dhcp|renew|down) ;; *) fail 'unknown action' ;; esac
+    n=0
+    while ! mkdir "$RUN/control.lock" 2>/dev/null; do
+        [ "$n" -lt 15 ] || fail 'network control lock is busy'
+        sleep 1; n=$((n+1))
+    done
+    trap 'rmdir "$RUN/control.lock"' EXIT
+    trap 'exit 1' HUP INT TERM
+    "$1"
+}
+if [ "${Q2_NETWORK_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

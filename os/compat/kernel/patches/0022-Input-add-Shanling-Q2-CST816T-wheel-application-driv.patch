@@ -1,0 +1,254 @@
+From af35a70f5b3cc93ddfdc968143c790c8fec4a277 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 14:13:57 -0500
+Subject: [PATCH 22/22] Input: add Shanling Q2 CST816T wheel application driver
+
+---
+ .../bindings/input/shanling,q2-wheel.yaml     |  34 +++++
+ arch/mips/boot/dts/ingenic/shanling-q2.dts    |   8 ++
+ arch/mips/configs/shanling_q2_defconfig       |   2 +
+ drivers/input/misc/Kconfig                    |   9 ++
+ drivers/input/misc/Makefile                   |   2 +
+ drivers/input/misc/shanling-q2-wheel.c        | 126 ++++++++++++++++++
+ 6 files changed, 181 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/input/shanling,q2-wheel.yaml
+ create mode 100644 drivers/input/misc/shanling-q2-wheel.c
+
+diff --git a/Documentation/devicetree/bindings/input/shanling,q2-wheel.yaml b/Documentation/devicetree/bindings/input/shanling,q2-wheel.yaml
+new file mode 100644
+index 000000000..1019f3894
+--- /dev/null
++++ b/Documentation/devicetree/bindings/input/shanling,q2-wheel.yaml
+@@ -0,0 +1,34 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/input/shanling,q2-wheel.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Shanling Q2 CST816T wheel firmware
++
++maintainers:
++  - linux-mips@vger.kernel.org
++
++description: |
++  The Q2 uses custom CST816T firmware with an absolute ring position at
++  register 0x21 (1 through 200, zero means released). This is not the generic
++  CST816T touchscreen coordinate protocol. PB20 resets the controller and
++  PB21 signals a new report with a falling edge.
++
++properties:
++  compatible:
++    const: shanling,q2-wheel
++  reg:
++    maxItems: 1
++  interrupts:
++    maxItems: 1
++  reset-gpios:
++    maxItems: 1
++
++required:
++  - compatible
++  - reg
++  - interrupts
++  - reset-gpios
++
++additionalProperties: false
+diff --git a/arch/mips/boot/dts/ingenic/shanling-q2.dts b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+index fb7472076..d076fa333 100644
+--- a/arch/mips/boot/dts/ingenic/shanling-q2.dts
++++ b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+@@ -10,6 +10,7 @@
+ #include "x2000.dtsi"
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
++#include <dt-bindings/interrupt-controller/irq.h>
+ 
+ / {
+ 	model = "Shanling Q2";
+@@ -212,6 +213,13 @@ &i2c2 {
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&i2c2_pins>;
+ 	clock-frequency = <200000>;
++	wheel@15 {
++		compatible = "shanling,q2-wheel";
++		reg = <0x15>;
++		interrupt-parent = <&gpb>;
++		interrupts = <21 IRQ_TYPE_EDGE_FALLING>;
++		reset-gpios = <&gpb 20 GPIO_ACTIVE_LOW>;
++	};
+ };
+ 
+ &i2c3 {
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index 88505c362..a58db1cc0 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -95,3 +95,5 @@ CONFIG_WATCHDOG=y
+ CONFIG_WATCHDOG_SYSFS=y
+ CONFIG_INGENIC_X2000_WDT=y
+ # CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED is not set
++CONFIG_INPUT_MISC=y
++CONFIG_INPUT_SHANLING_Q2_WHEEL=y
+diff --git a/drivers/input/misc/Kconfig b/drivers/input/misc/Kconfig
+index 169768e3d..ece7a6319 100644
+--- a/drivers/input/misc/Kconfig
++++ b/drivers/input/misc/Kconfig
+@@ -13,6 +13,15 @@ menuconfig INPUT_MISC
+ 
+ if INPUT_MISC
+ 
++config INPUT_SHANLING_Q2_WHEEL
++	tristate "Shanling Q2 capacitive wheel"
++	depends on I2C && GPIOLIB
++	help
++	  Input support for the CST816T with Q2 wheel firmware. Reports
++	  absolute ring position, pressure and touch state through evdev.
++	  This driver uses the application protocol only and does not
++	  update controller firmware. Module name: shanling-q2-wheel.
++
+ config INPUT_88PM860X_ONKEY
+ 	tristate "88PM860x ONKEY support"
+ 	depends on MFD_88PM860X
+diff --git a/drivers/input/misc/Makefile b/drivers/input/misc/Makefile
+index 1339619f0..1a6efebed 100644
+--- a/drivers/input/misc/Makefile
++++ b/drivers/input/misc/Makefile
+@@ -97,3 +97,5 @@ obj-$(CONFIG_INPUT_WM831X_ON)		+= wm831x-on.o
+ obj-$(CONFIG_INPUT_XEN_KBDDEV_FRONTEND)	+= xen-kbdfront.o
+ obj-$(CONFIG_INPUT_YEALINK)		+= yealink.o
+ obj-$(CONFIG_INPUT_IDEAPAD_SLIDEBAR)	+= ideapad_slidebar.o
++
++obj-$(CONFIG_INPUT_SHANLING_Q2_WHEEL) += shanling-q2-wheel.o
+diff --git a/drivers/input/misc/shanling-q2-wheel.c b/drivers/input/misc/shanling-q2-wheel.c
+new file mode 100644
+index 000000000..ca83fb4d0
+--- /dev/null
++++ b/drivers/input/misc/shanling-q2-wheel.c
+@@ -0,0 +1,126 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Q2 CST816T wheel firmware protocol, derived from stock hyn_slider.ko. */
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++
++struct q2_wheel {
++	struct i2c_client *client;
++	struct input_dev *input;
++	struct gpio_desc *reset;
++};
++
++static irqreturn_t q2_wheel_irq(int irq, void *data)
++{
++	struct q2_wheel *wheel = data;
++	int pos;
++
++	pos = i2c_smbus_read_byte_data(wheel->client, 0x21);
++	if (pos < 0) {
++		dev_warn_ratelimited(&wheel->client->dev, "position read failed: %d\n", pos);
++		return IRQ_HANDLED;
++	}
++	if (pos > 200) {
++		dev_warn_ratelimited(&wheel->client->dev, "invalid position: %d\n", pos);
++		return IRQ_HANDLED;
++	}
++	if (pos)
++		input_report_abs(wheel->input, ABS_X, pos);
++	input_report_abs(wheel->input, ABS_PRESSURE, !!pos);
++	input_report_key(wheel->input, BTN_TOUCH, !!pos);
++	input_sync(wheel->input);
++	return IRQ_HANDLED;
++}
++
++static void q2_wheel_reset(void *data)
++{
++	struct q2_wheel *wheel = data;
++
++	gpiod_set_value_cansleep(wheel->reset, 1);
++}
++
++static int q2_wheel_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct q2_wheel *wheel;
++	int chip, project, ret;
++
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
++		return -EOPNOTSUPP;
++	if (client->irq <= 0)
++		return dev_err_probe(dev, -EINVAL, "interrupt is required\n");
++	wheel = devm_kzalloc(dev, sizeof(*wheel), GFP_KERNEL);
++	if (!wheel)
++		return -ENOMEM;
++	wheel->client = client;
++	wheel->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(wheel->reset))
++		return dev_err_probe(dev, PTR_ERR(wheel->reset), "reset GPIO unavailable\n");
++	ret = devm_add_action_or_reset(dev, q2_wheel_reset, wheel);
++	if (ret)
++		return ret;
++
++	/* Stock cst8xxT_rst asserts PB20 for 11 ms. Allow application startup;
++	 * do not enter the boot address or attempt a firmware update.
++	 */
++	usleep_range(11000, 12000);
++	gpiod_set_value_cansleep(wheel->reset, 0);
++	msleep(50);
++	chip = i2c_smbus_read_byte_data(client, 0xa7);
++	if (chip < 0)
++		return dev_err_probe(dev, chip, "chip identity read failed\n");
++	project = i2c_smbus_read_byte_data(client, 0xa8);
++	if (project < 0)
++		return dev_err_probe(dev, project, "project identity read failed\n");
++	if (chip != 0xb6 || project != 0x02)
++		return dev_err_probe(dev, -ENODEV, "unsupported wheel identity %02x/%02x\n",
++				     chip, project);
++
++	wheel->input = devm_input_allocate_device(dev);
++	if (!wheel->input)
++		return -ENOMEM;
++	/* Preserve the existing Q2 userspace discovery name. */
++	wheel->input->name = "hyn_sliderbar";
++	wheel->input->id.bustype = BUS_I2C;
++	input_set_abs_params(wheel->input, ABS_X, 1, 200, 0, 0);
++	input_set_abs_params(wheel->input, ABS_PRESSURE, 0, 1, 0, 0);
++	input_set_capability(wheel->input, EV_KEY, BTN_TOUCH);
++	ret = input_register_device(wheel->input);
++	if (ret)
++		return ret;
++	ret = devm_request_threaded_irq(dev, client->irq, NULL, q2_wheel_irq,
++					IRQF_ONESHOT, dev_name(dev), wheel);
++	if (ret)
++		return dev_err_probe(dev, ret, "interrupt request failed\n");
++	i2c_set_clientdata(client, wheel);
++	return 0;
++}
++
++static void q2_wheel_shutdown(struct i2c_client *client)
++{
++	disable_irq(client->irq);
++	q2_wheel_reset(i2c_get_clientdata(client));
++}
++
++static const struct of_device_id q2_wheel_of_match[] = {
++	{ .compatible = "shanling,q2-wheel" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, q2_wheel_of_match);
++
++static struct i2c_driver q2_wheel_driver = {
++	.probe = q2_wheel_probe,
++	.shutdown = q2_wheel_shutdown,
++	.driver = {
++		.name = "shanling-q2-wheel",
++		.of_match_table = q2_wheel_of_match,
++	},
++};
++module_i2c_driver(q2_wheel_driver);
++
++MODULE_DESCRIPTION("Shanling Q2 CST816T wheel firmware input");
++MODULE_LICENSE("GPL");

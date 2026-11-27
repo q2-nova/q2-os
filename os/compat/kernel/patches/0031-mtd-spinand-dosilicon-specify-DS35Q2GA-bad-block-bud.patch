@@ -1,0 +1,28 @@
+From 35fb7f11b180f487b65fce25074e27da8ba0c8b2 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 17:45:26 -0500
+Subject: [PATCH] mtd: spinand: dosilicon: specify DS35Q2GA bad-block budget
+
+Dosilicon DS35X2GAXXX Rev.09 parameter-page bytes 103-104 specify 0x0028
+maximum bad blocks per LUN. Replace the previously unknown zero with 40.
+This is manufacturer geometry, not measured wear or a guarantee for
+every emulated image.
+---
+ drivers/mtd/nand/spi/dosilicon.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/mtd/nand/spi/dosilicon.c b/drivers/mtd/nand/spi/dosilicon.c
+index 54d270d15..d410e9432 100644
+--- a/drivers/mtd/nand/spi/dosilicon.c
++++ b/drivers/mtd/nand/spi/dosilicon.c
+@@ -70,8 +70,8 @@ static const struct spinand_info dosilicon_spinand_table[] = {
+ 		SPINAND_ECCINFO(&ds35xx_ooblayout, NULL)),
+ 	SPINAND_INFO("DS35Q2GA",
+ 		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0x72),
+-		/* Vendor geometry; maximum factory bad-block count is unknown. */
+-		NAND_MEMORG(1, 2048, 64, 64, 2048, 0, 2, 1, 1),
++		/* DS35X2GAXXX Rev.09 parameter page bytes 103-104: 40. */
++		NAND_MEMORG(1, 2048, 64, 64, 2048, 40, 2, 1, 1),
+ 		NAND_ECCREQ(4, 512),
+ 		SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
+ 					 &write_cache_variants,

@@ -1,0 +1,20 @@
+From f5243479e8447ff6e128fe1a258b021d60b2bdac Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 11:53:08 -0500
+Subject: [PATCH] MIPS: q2: stabilize kernel release and initramfs timestamps
+
+---
+ arch/mips/configs/shanling_q2_defconfig | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index 9f66082e7..7fd26638f 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -74,3 +74,6 @@ CONFIG_PWM=y
+ CONFIG_PWM_INGENIC_X2000=y
+ CONFIG_BACKLIGHT_CLASS_DEVICE=y
+ CONFIG_BACKLIGHT_PWM=y
++CONFIG_LOCALVERSION="-q2"
++# CONFIG_LOCALVERSION_AUTO is not set
++# CONFIG_INITRAMFS_PRESERVE_MTIME is not set

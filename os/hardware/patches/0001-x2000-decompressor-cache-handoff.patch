@@ -1,0 +1,74 @@
+--- a/arch/mips/boot/compressed/head.S
++++ b/arch/mips/boot/compressed/head.S
+@@ -14,6 +14,9 @@
+ 
+ #include <asm/asm.h>
+ #include <asm/regdef.h>
++#include <asm/addrspace.h>
++#include <asm/cacheops.h>
++#include <asm/mipsregs.h>
+ 
+ 	LEAF(start)
+ 	/* Save boot rom start args */
+@@ -36,12 +39,61 @@
+ 	jalr	t9
+ 
+ 2:
++#ifdef CONFIG_INGENIC_X2000_SMP
++	/* X2000: the decompressor has written the kernel through KSEG0.
++	 * Execute maintenance uncached, with no stack accesses afterwards.
++	 * Match the vendor soc-x2000/include/soc/cache.h sequence exactly:
++	 * L1D, L1I, sync + uncached load, L2, sync + uncached load.
++	 * SPL holds other CPUs in reset; boot arguments remain in s0..s3.
++	 */
++	.set push
++	.set noreorder
++	mfc0	t0, CP0_PRID
++	li	t1, 0xffffff00
++	and	t0, t0, t1
++	li	t1, 0x00132000
++	bne	t0, t1, 9f
++	nop
++	PTR_LA	t9, 4f
++	li	t0, 0x20000000
++	or	t9, t9, t0
++	jr.hb	t9
++	nop
++4:	li	t0, CKSEG0
++	li	t1, CKSEG0 + 32768
++5:	cache	Index_Writeback_Inv_D, 0(t0)
++	addiu	t0, t0, 32
++	bne	t0, t1, 5b
++	nop
++	li	t0, CKSEG0
++6:	cache	Index_Invalidate_I, 0(t0)
++	addiu	t0, t0, 32
++	bne	t0, t1, 6b
++	nop
++	li	t2, CKSEG1
++	sync
++	lw	zero, 0(t2)
++	li	t0, CKSEG0
++	li	t1, CKSEG0 + (512 * 1024)
++7:	cache	Index_Writeback_Inv_SD, 0(t0)
++	addiu	t0, t0, 64
++	bne	t0, t1, 7b
++	nop
++	sync
++	lw	zero, 0(t2)
++9:
++	.set pop
++#endif
+ 	move	a0, s0
+ 	move	a1, s1
+ 	move	a2, s2
+ 	move	a3, s3
+ 	PTR_LI	t9, KERNEL_ENTRY
++#ifdef CONFIG_INGENIC_X2000_SMP
++	jalr.hb t9
++#else
+ 	jalr	t9
++#endif
+ 
+ 3:
+ 	b	3b

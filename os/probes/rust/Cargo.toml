@@ -1,0 +1,13 @@
+[package]
+name = "q2-rust-probe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+ureq = { version = "=2.12.1", features = ["socks-proxy"] }

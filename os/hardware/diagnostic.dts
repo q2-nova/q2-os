@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0
+/* SPL diagnostic tree, derived from kernel/ram-handoff. Not the normal player board description. */
+/dts-v1/;
+#include "x2000.dtsi"
+
+/ {
+	model = "Shanling Q2 SPL diagnostic";
+	compatible = "shanling,q2", "ingenic,x2000";
+	aliases {
+		serial0 = &uart0;
+		serial3 = &uart3;
+	};
+	chosen {
+		stdout-path = "serial3:115200n8";
+		bootargs = "console=ttyS3,115200n8 console=ttyS0,115200n8 rdinit=/init panic=0 maxcpus=1 clk_ignore_unused";
+	};
+	memory@0 {
+		device_type = "memory";
+		reg = <0 0x08000000>;
+	};
+};
+
+/* UART0 is the emulator harness, UART3 is the unexposed physical console. */
+&uart0 { status = "okay"; };
+&uart3 { status = "okay"; };
+&usbphy { status = "okay"; };
+&otg {
+	status = "okay";
+	dr_mode = "peripheral";
+};
+
+/* Inherit the armed watchdog; its real RTC source remains a hardware gate. */
+&watchdog { status = "okay"; };
+&rtc { status = "disabled"; };
+&sfc { status = "disabled"; };
+&msc2 { status = "disabled"; };
+/* No board PMIC bus, regulators, panel, DACs, backlight or storage children. */

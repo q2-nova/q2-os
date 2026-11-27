@@ -1,0 +1,68 @@
+From: Q2 OS integration
+Subject: [PATCH] ASoC: x2000: sample DMA and FIFO position coherently
+
+Normal-time full-player emulation accepted all 176400 source frames but
+captured 144872 after two false EPIPE recoveries. Read DBA around FSR and
+retry if DMA refilled the FIFO between samples. A bounded failure retains
+the last coherent pointer. Reset that cached position on prepare.
+
+The same instrumented run then captured 176455 frames with no EPIPE;
+55 extra frames are within the existing bounded drain tolerance.
+This is emulator evidence, not physical timing or cache qualification.
+
+--- a/sound/soc/jz4740/x2000-audio.c
++++ b/sound/soc/jz4740/x2000-audio.c
+@@ -54,22 +54,34 @@
+ 	struct snd_pcm_substream *substream;
+ 	bool running, shutting_down;
+ 	unsigned int buffer_bytes, period_bytes, last_pos, period_pos;
++	unsigned int snapshot_pos;
+ };
+ 
+ static unsigned int x2000_position(struct x2000_audio *audio)
+ {
+-	u32 pos = readl(audio->base + DBA) -
+-		  audio->substream->runtime->dma_addr;
+-
+-	u32 queued = ((readl(audio->base + FSR) >> 16) & 0x1fff) * 4;
+-
+-	/* DBA includes prefetched FIFO words. Report the serial-consumption
+-	 * position so period-aligned drains do not discard the buffered tail.
+-	 * FSR is word-counted for the supported packed stereo formats.
++	u32 before, after, queued;
++	unsigned int tries;
++
++	/* DBA includes prefetched FIFO words. Both registers change while
++	 * playback runs; mixing an old DMA address with a refilled FIFO can
++	 * move the reported position backwards and cause a false ALSA XRUN.
++	 * Only publish a FIFO snapshot bracketed by an unchanged DMA address.
+ 	 */
+-	if (pos >= audio->buffer_bytes || queued > audio->buffer_bytes)
+-		return 0;
+-	return (pos + audio->buffer_bytes - queued) % audio->buffer_bytes;
++	for (tries = 0; tries < 8; tries++) {
++		before = readl(audio->base + DBA);
++		queued = ((readl(audio->base + FSR) >> 16) & 0x1fff) * 4;
++		after = readl(audio->base + DBA);
++		if (before == after) {
++			u32 pos = before - audio->substream->runtime->dma_addr;
++			if (pos < audio->buffer_bytes && queued <= audio->buffer_bytes)
++				audio->snapshot_pos = (pos + audio->buffer_bytes - queued) % audio->buffer_bytes;
++			return audio->snapshot_pos;
++		}
++	}
++	/* Keep the last coherent sample if DMA advances throughout the bounded
++	 * retries. The next poll catches up without inventing a ring wrap.
++	 */
++	return audio->snapshot_pos;
+ }
+ 
+ static enum hrtimer_restart x2000_poll(struct hrtimer *timer)
+@@ -243,6 +255,7 @@
+ 	writel(9 << 10, audio->base + BST1);
+ 	writel(9 << 5, audio->base + BTT0);
+ 	writel(BIT(9), audio->base + BTSET);
++	audio->snapshot_pos = 0;
+ 	audio->last_pos = 0;
+ 	audio->period_pos = 0;
+ 	return 0;

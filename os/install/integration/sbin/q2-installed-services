@@ -1,0 +1,265 @@
+#!/bin/sh
+# Immutable-root baseline player with optional verified persistent app images.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RUN=/run/q2nd
+SYS=/sys
+PROC=/proc
+SUPERVISOR=/etc/init.d/S79q2-supervisor
+MEMORY_GUARD=/etc/init.d/S77q2-memory-guard
+PLAYER=/usr/bin/q2nd
+APP_UPDATE=/usr/sbin/q2-app-update
+SELF=/sbin/q2-installed-services
+STATE_ROOT=/state
+STATE_STATUS=/run/q2/state-status
+USB_SESSION=/run/q2/usb-storage
+LOG=/run/log
+SD_MOUNT=/mnt/mmc
+SD_DEV=/dev/mmcblk0p1
+# FAT32 cards: fat/vfat ship as modules outside modules.dep (insmod by path).
+FAT_MODULES=/lib/modules/7.3.0-q2+/kernel/fs/fat
+RAM_MEDIA=/run/q2-media
+STATUS_CONTROL=/usr/sbin/q2-usb-status-control
+umask 077
+fail() { echo "q2-installed-services: $*" >&2; exit 1; }
+bootmark() {
+    file=$RUN/service-boot-times
+    [ ! -L "$file" ] && { [ ! -e "$file" ] || { [ -f "$file" ] && [ "$(wc -c < "$file")" -lt 65408 ]; }; } || return 0
+    read -r uptime idle < "$PROC/uptime" || return 0
+    case "$uptime" in *.*) ;; *) return 0 ;; esac
+    case "${uptime%.*}:${uptime#*.}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+    printf '%s %s\n' "$uptime" "$1" >> "$file" 2>/dev/null || :
+}
+mounted() { awk -v target="$1" '$2 == target { print $1 " " $3 }' "$PROC/mounts"; }
+mount_card() {
+    mount -t exfat -o nosuid,nodev,noexec "$SD_DEV" "$SD_MOUNT" 2>/dev/null && return 0
+    for module in fat vfat; do
+        grep -q "^$module " "$PROC/modules" 2>/dev/null || [ ! -f "$FAT_MODULES/$module.ko" ] || insmod "$FAT_MODULES/$module.ko" || :
+    done
+    mount -t vfat -o nosuid,nodev,noexec,utf8,shortname=mixed,errors=remount-ro "$SD_DEV" "$SD_MOUNT" || :
+}
+media_setup() {
+    export Q2ND_SD_READY=0
+    export Q2ND_LEGACY_MEDIA=0
+    mkdir -p "$SD_MOUNT" "$RAM_MEDIA" "$LOG"
+    card=$(readlink -f "$SYS/class/block/mmcblk0/device" 2>/dev/null || :)
+    case "$card" in */13490000.mmc/*)
+        if [ -b "$SD_DEV" ]; then
+            if [ -z "$(mounted "$SD_MOUNT")" ]; then
+                mount_card
+            fi
+            case "$(mounted "$SD_MOUNT")" in "$SD_DEV exfat"|"$SD_DEV vfat") card_fs=ok ;; *) card_fs= ;; esac
+            if [ "$card_fs" = ok ]; then
+                if mkdir -p "$SD_MOUNT/Q2Mainline/media"; then
+                    export Q2ND_SD_READY=1
+                    marker=$SD_MOUNT/Q2Mainline/legacy-media-v1
+                    if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = Q2Navidrome ]; then
+                        export Q2ND_LEGACY_MEDIA=1
+                    fi
+                fi
+            fi
+        fi ;;
+    esac
+    if [ "$Q2ND_SD_READY" = 0 ]; then
+        current=$(mounted "$RAM_MEDIA")
+        if [ -z "$current" ]; then
+            mount -t tmpfs -o size=16m,nosuid,nodev,noexec q2-media "$RAM_MEDIA" || fail 'bounded RAM media mount failed'
+        else
+            [ "$current" = 'q2-media tmpfs' ] || fail 'unexpected temporary media mount'
+        fi
+    fi
+}
+stop_service() {
+    bootmark service-stop-supervisor-begin
+    "$SUPERVISOR" stop || fail 'supervisor could not disarm'
+    bootmark service-stop-supervisor-returned
+    bootmark service-stop-launcher-begin
+    # Direct `run` also publishes its PID before touching storage. Do not miss
+    # the short launcher.lock -> launcher.pid registration interval.
+    n=0
+    while [ -d "$RUN/launcher.lock" ] && [ ! -s "$RUN/launcher.pid" ]; do
+        [ "$n" -lt 50 ] || fail 'launcher registration did not finish'
+        sleep .1; n=$((n+1))
+    done
+    if [ -s "$RUN/launcher.pid" ]; then
+        pid=$(cat "$RUN/launcher.pid")
+        case "$pid" in ''|*[!0-9]*) fail 'invalid launcher PID' ;; esac
+        [ "$pid" -gt 1 ] || fail 'invalid launcher PID'
+        if kill -0 "$pid" 2>/dev/null; then
+            command=$(tr '\000' ' ' < "$PROC/$pid/cmdline")
+            case "$command" in *q2-installed-services*run*) ;; *) fail 'launcher PID is not this service' ;; esac
+            kill -TERM "$pid"
+            n=0
+            while kill -0 "$pid" 2>/dev/null; do
+                [ "$n" -lt 25 ] || fail 'player service did not stop'
+                sleep 1; n=$((n+1))
+            done
+        fi
+    fi
+    [ ! -s "$RUN/player.pid" ] || fail 'player remains active'
+    bootmark service-stop-launcher-returned
+}
+usb_local() {
+    [ ! -d "$USB_SESSION" ] || [ "$(cat "$USB_SESSION/phase" 2>/dev/null)" = local-ready ]
+}
+# Capture only kernel numeric process incarnation, not command text. Sampling
+# may lose an immediately exiting child; absent identity is an explicit skip.
+player_start_ticks() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "$PROC/$1/stat" ] || return 1
+    awk '{ sub(/^.*\) /, ""); if (NF >= 20 && $20 ~ /^[0-9]+$/ && $20 != "0") print $20; else exit 1 }' "$PROC/$1/stat"
+}
+record_player_exit() {
+    case "${player_start:-}" in ''|*[!0-9]*) echo Q2_TELEMETRY_PROCESS_EXIT_SKIPPED; return 0 ;; esac
+    # A separate invocation reads only the generated capture-context whitelist.
+    # Its optional failure cannot hold up recovery or launch restoration.
+    if timeout -k 1 3 "$PLAYER" --telemetry-process-exit "$player" "$player_start" "$1" "$2" >/dev/null 2>&1; then
+        echo Q2_TELEMETRY_PROCESS_EXIT_RECORDED
+    else
+        telemetry_status=$?
+        if [ "$telemetry_status" -eq 3 ]; then echo Q2_TELEMETRY_PROCESS_EXIT_SKIPPED
+        else echo Q2_TELEMETRY_PROCESS_EXIT_UNAVAILABLE; fi
+    fi
+}
+select_player() {
+    [ -x "$APP_UPDATE" ] || return 0
+    PLAYER=/usr/bin/q2nd
+    # The running launcher owns this marker only during image preparation.
+    printf '%s\n' "$$" > "$RUN/app-preparing"
+    bootmark app-prepare-begin
+    if "$APP_UPDATE" prepare; then
+        IFS= read -r PLAYER < "$RUN/app-player" || fail 'app selection missing'
+    else
+        echo Q2_APP_SELECTION_FALLBACK >&2
+        PLAYER=/usr/bin/q2nd
+    fi
+    bootmark app-prepare-complete
+    rm -f "$RUN/app-preparing"
+    case "$PLAYER" in /usr/bin/q2nd|/run/q2-app/q2nd) ;; *) fail 'invalid app selection';; esac
+}
+run_service() {
+    mkdir -p "$RUN" "$LOG"
+    [ ! -e "$RUN/start-held" ] || fail 'player startup held for setup; resume explicitly'
+    mkdir "$RUN/launcher.lock" 2>/dev/null || fail 'player launcher is already active or its lock requires recovery'
+    player=
+    player_start=
+    stop_reason=launcher-cleanup
+    cleanup() {
+        trap - EXIT HUP INT TERM
+        bootmark service-cleanup-begin
+        bootmark service-cleanup-supervisor-begin
+        "$SUPERVISOR" stop || :
+        bootmark service-cleanup-supervisor-returned
+        if [ -n "$player" ] && kill -0 "$player" 2>/dev/null; then
+            bootmark service-cleanup-child-begin
+            kill -TERM "$player" || :
+            n=0
+            while kill -0 "$player" 2>/dev/null; do
+                [ "$n" -lt 20 ] || exit 1
+                sleep 1; n=$((n+1))
+            done
+            if wait "$player" 2>/dev/null; then code=0; else code=$?; fi
+            record_player_exit "$code" "${stop_reason:-launcher-cleanup}"
+            player=
+            bootmark service-cleanup-child-returned
+        fi
+        [ ! -x "$APP_UPDATE" ] || "$APP_UPDATE" unmount || exit 1
+        rm -f "$RUN/app-preparing" "$RUN/app-player" "$RUN/app-image" "$RUN/player.pid" "$RUN/launcher.pid" "$RUN/ready" "$RUN/service.started"
+        rmdir "$RUN/launcher.lock"
+        bootmark service-cleanup-returned
+    }
+    trap cleanup EXIT
+    trap 'stop_reason=commanded-stop; exit 0' HUP INT TERM
+    echo $$ > "$RUN/launcher.pid"
+    [ ! -e "$RUN/start-held" ] || fail 'player startup held for setup; resume explicitly'
+    [ "$(cat "$STATE_STATUS" 2>/dev/null)" = ready ] || fail 'internal state unavailable; diagnostics remain active'
+    usb_local || fail 'USB storage handoff is active'
+    mkdir -p "$STATE_ROOT/app" "$STATE_ROOT/network" "$STATE_ROOT/Q2Navidrome"
+    bootmark media-setup-begin
+    media_setup
+    bootmark media-setup-complete
+    export Q2ND_INSTALLED_STORAGE=1 Q2ND_PLATFORM=mainline Q2ND_DATA="$STATE_ROOT/Q2Navidrome"
+    export Q2ND_RUNTIME="$RUN" Q2ND_HEALTH_SOCKET="$RUN/health.sock" Q2ND_REQUIRE_HEALTH=1
+    export Q2ND_WPA_CTRL=/run/wpa_supplicant/wlan0 Q2ND_CLOCK_STATUS=/run/q2/clock-status
+    [ ! -f "$STATE_ROOT/trust/navidrome-ca.der" ] || export Q2ND_TLS_CA="$STATE_ROOT/trust/navidrome-ca.der"
+    control=$STATUS_CONTROL
+    [ -x "$control" ] || control=/run/q2/q2-usb-status-control
+    if [ -s /run/q2/usb-status.pid ]; then
+        [ -x "$control" ] && "$control" stop || fail 'USB status display could not release ownership'
+    fi
+    # Thrash guard before the supervisor and the player (docs/bugs/thrash-watchdog-reset.md);
+    # it stays running across player restarts and starts once per boot.
+    [ ! -x "$MEMORY_GUARD" ] || "$MEMORY_GUARD" start || :
+    "$SUPERVISOR" start || fail 'supervision unavailable'
+    [ ! -e "$RUN/rescue" ] || fail 'supervisor entered rescue'
+    : > "$RUN/service.started"
+    failures=0
+    while [ "$failures" -lt 3 ]; do
+        select_player
+        bootmark player-launch-requested
+        "$PLAYER" --mainline --data "$STATE_ROOT/Q2Navidrome" >> "$LOG/player.log" 2>&1 &
+        player=$!
+        player_start=$(player_start_ticks "$player" 2>/dev/null) || player_start=
+        echo "$player" > "$RUN/player.pid"
+        if wait "$player"; then code=0; else code=$?; fi
+        record_player_exit "$code" unexpected-exit
+        player=
+        [ ! -x "$APP_UPDATE" ] || "$APP_UPDATE" failed || fail 'trial rollback failed'
+        rm -f "$RUN/player.pid" "$RUN/ready"
+        if [ "$code" -ne 0 ]; then failures=$((failures+1)); fi
+        [ "$failures" -lt 3 ] || break
+        sleep 1
+    done
+    fail 'player restart limit reached; diagnostics remain active'
+}
+# Serialise the complete parent start handshake against stop/hold/resume.
+# launcher.pid alone cannot represent a child that has not published it yet.
+control_lock() {
+    mkdir -p "$RUN" "$LOG"
+    n=0
+    while ! mkdir "$RUN/control.lock" 2>/dev/null; do
+        [ "$n" -lt 300 ] || fail 'another service control operation is active or stale'
+        sleep .1; n=$((n+1))
+    done
+    trap 'rmdir "$RUN/control.lock"' EXIT
+    trap 'exit 1' HUP INT TERM
+}
+start_service() {
+    mkdir -p "$RUN" "$LOG"
+    [ ! -e "$RUN/start-held" ] || fail 'player startup held for setup; resume explicitly'
+    if [ -s "$RUN/launcher.pid" ] && kill -0 "$(cat "$RUN/launcher.pid")" 2>/dev/null; then return; fi
+    usb_local || fail 'USB storage handoff is active'
+    rm -f "$RUN/service.started"
+    "$SELF" run >> "$LOG/player-service.log" 2>&1 &
+    launched=$!
+    n=0
+    while [ ! -e "$RUN/service.started" ]; do
+        kill -0 "$launched" 2>/dev/null || fail 'player service startup failed; see RAM log'
+        [ "$n" -lt 15 ] || fail 'player service did not become ready'
+        sleep 1; n=$((n+1))
+    done
+}
+main() {
+    action=${1:-start}
+    case "$action" in
+        run) run_service; return ;;
+        start|stop|restart|hold|resume) control_lock ;;
+        *) fail 'usage: q2-installed-services start|stop|restart|hold|resume' ;;
+    esac
+    case "$action" in
+        start) start_service ;;
+        stop) stop_service ;;
+        restart) stop_service; start_service ;;
+        hold)
+            : > "$RUN/start-held"
+            stop_service
+            ;;
+        resume)
+            [ "$(cat "$STATE_STATUS" 2>/dev/null)" = ready ] && usb_local || fail 'storage is not ready; setup hold retained'
+            rm -f "$RUN/start-held"
+            start_service
+            ;;
+    esac
+}
+if [ "${Q2_SERVICES_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

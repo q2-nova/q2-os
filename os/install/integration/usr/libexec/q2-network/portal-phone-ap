@@ -1,0 +1,257 @@
+#!/bin/sh
+# Private entry for Q2 SkyMiles sign-in. The foreground watcher owns wlan1.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/libexec/q2-network
+export PATH
+RUN=/run/q2-portal-phone
+PROC=/proc
+SYS=/sys
+HOSTAPD=/usr/libexec/q2-network/hostapd
+HOSTAPD_CLI=/usr/libexec/q2-network/hostapd_cli
+DNSMASQ=/usr/libexec/q2-network/dnsmasq
+IW=/usr/libexec/q2-network/iw
+WPA_PID=/run/q2-network/wpa.pid
+umask 077
+fail() { echo 'Phone setup could not complete this step.' >&2; exit 1; }
+tick() { awk '{print int($1)}' "$PROC/uptime"; }
+stamp() { awk '{print $22}' "$PROC/$1/stat"; }
+running() { [ -r "$PROC/$1/stat" ] && [ "$(awk '{print $3}' "$PROC/$1/stat")" != Z ]; }
+owned() {
+    owned_file=$1 expected=$2
+    [ -s "$owned_file" ] && [ -s "$owned_file.start" ] || return 1
+    owned_pid=$(cat "$owned_file")
+    case "$owned_pid" in ''|*[!0-9]*) return 2 ;; esac
+    [ "$owned_pid" -gt 1 ] || return 2
+    running "$owned_pid" || return 1
+    [ "$(stamp "$owned_pid")" = "$(cat "$owned_file.start")" ] || return 2
+    [ "$(cat "$PROC/$owned_pid/comm")" = "$expected" ] || return 2
+}
+launched_child() {
+    child_file=$1
+    [ -s "$child_file" ] && [ -s "$child_file.start" ] || return 2
+    owned_pid=$(cat "$child_file")
+    case "$owned_pid" in ''|*[!0-9]*) return 2 ;; esac
+    [ "$owned_pid" -gt 1 ] || return 2
+    running "$owned_pid" || return 1
+    [ "$(stamp "$owned_pid")" = "$(cat "$child_file.start")" ] || return 2
+    [ "$(awk '{print $4}' "$PROC/$owned_pid/stat")" = "$$" ] || return 2
+}
+terminate() {
+    file=$1 expected=$2
+    if owned "$file" "$expected"; then
+        :
+    else
+        # A foreign/reused PID is not a dead owned child. Preserve its marker,
+        # and let cleanup continue stopping the other independently owned child.
+        state=$?
+        if [ "$state" = 1 ]; then rm -f "$file" "$file.start"; return 0; fi
+        # A stop signal can arrive between our fork and the child's exec.
+        # Start-time plus direct-parent proof permits only that unreaped child.
+        launched_child "$file" || return 1
+    fi
+    stopping=$owned_pid
+    kill -TERM "$stopping"
+    attempts=0
+    while running "$stopping" && [ "$attempts" -lt 20 ]; do sleep 0.1; attempts=$((attempts+1)); done
+    if running "$stopping"; then
+        if ! owned "$file" "$expected"; then launched_child "$file" || return 1; fi
+        kill -KILL "$owned_pid"
+    fi
+    wait "$stopping" 2>/dev/null || :
+    rm -f "$file" "$file.start"
+}
+remember() { echo "$2" > "$1"; stamp "$2" > "$1.start"; }
+remember_launched() {
+    launch_file=$1 launch_pid=$2 launch_name=$3
+    remember "$launch_file" "$launch_pid"
+    attempts=0
+    # After fork the child can still have the shell's comm until exec runs.
+    # Do not classify our just-created child as foreign before that transition.
+    while running "$launch_pid"; do
+        if owned "$launch_file" "$launch_name"; then return 0; fi
+        [ "$attempts" -lt 30 ] || break
+        sleep 0.1; attempts=$((attempts+1))
+    done
+    terminate "$launch_file" "$launch_name" || return 1
+    return 1
+}
+check_channel() {
+    case "$1" in 1|2|3|4|5|6|7|8|9|10|11|12|13|36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144|149|153|157|161|165|169|173|177) ;; *) fail ;; esac
+}
+frequencies() {
+    # A read-only query: never set a country, relax no-IR, start CAC, or move STA.
+    [ -L "$SYS/class/net/wlan0/phy80211" ] || fail
+    queried_phy=$(readlink -f "$SYS/class/net/wlan0/phy80211") || fail
+    "$IW" phy "${queried_phy##*/}" info | awk '
+      $1=="*" && $3=="MHz" {
+        flags=tolower($0); f=$2+0; c=$4; gsub(/\[|\]/,"",c); c+=0;
+        valid=(c>=1 && c<=13 && f==2407+5*c) ||
+          (c>=36 && c<=144 && c%4==0 && f==5000+5*c) ||
+          (c>=149 && c<=177 && (c-149)%4==0 && f==5000+5*c);
+        if(valid && flags !~ /disabled|no[[:space:]]*ir|radar|no[[:space:]]*20mhz/) printf "%.0f\n",f;
+      }'
+}
+channel_allowed() {
+    check_channel "$1"
+    if [ "$1" -le 13 ]; then wanted=$((2407+5*$1)); else wanted=$((5000+5*$1)); fi
+    frequencies | awk -v wanted="$wanted" '$1==wanted {found=1} END {if(!found)exit 1}'
+}
+station_frequency() {
+    "$IW" dev wlan0 link | awk '
+      /^Connected to / {connected=1}
+      /^[[:space:]]*freq:/ {frequency=$2+0}
+      /^Not connected\./ {disconnected=1}
+      END {
+        if(connected && frequency>0) printf "%.0f\n",frequency;
+        else if(disconnected) print "none";
+        else exit 1;
+      }'
+}
+write_hostapd() {
+    {
+        echo 'interface=wlan1'
+        echo 'driver=nl80211'
+        echo "ctrl_interface=$RUN/hostapd"
+        if [ "$channel" -le 13 ]; then echo 'hw_mode=g'; else echo 'hw_mode=a'; fi
+        echo "channel=$channel"
+        echo 'wmm_enabled=1'
+        echo 'ieee80211n=1'
+        echo 'wpa=2'
+        echo 'wpa_key_mgmt=WPA-PSK'
+        echo 'rsn_pairwise=CCMP'
+        echo 'auth_algs=1'
+        echo 'max_num_sta=1'
+        echo 'ap_isolate=1'
+        echo 'logger_syslog=0'
+        echo 'logger_stdout=0'
+        printf 'ssid=%s\nwpa_passphrase=%s\n' "$ssid" "$password"
+    } > "$RUN/hostapd.conf.new"
+    mv "$RUN/hostapd.conf.new" "$RUN/hostapd.conf"
+}
+start_hostapd() {
+    write_hostapd
+    "$HOSTAPD" "$RUN/hostapd.conf" > /dev/null 2>&1 &
+    remember_launched "$RUN/hostapd.pid" "$!" hostapd
+}
+hostapd_ready() {
+    "$HOSTAPD_CLI" -p "$RUN/hostapd" -i wlan1 status 2>/dev/null | awk '/^state=ENABLED$/ {ok=1} END{if(!ok)exit 1}'
+}
+prepare_interface() {
+    [ "$(cat "$PROC/sys/net/ipv4/ip_forward")" = 0 ] || fail
+    [ ! -f "$PROC/sys/net/ipv6/conf/all/forwarding" ] || [ "$(cat "$PROC/sys/net/ipv6/conf/all/forwarding")" = 0 ] || fail
+    channel_allowed "$channel" || fail
+    # A connection may have changed between the app's read-only query and now.
+    # Refuse before touching the AP interface rather than move a live station.
+    connected_frequency=$(station_frequency) || fail
+    if [ "$channel" -le 13 ]; then chosen_frequency=$((2407+5*channel)); else chosen_frequency=$((5000+5*channel)); fi
+    if [ "$connected_frequency" != none ]; then
+        [ "$connected_frequency" = "$chosen_frequency" ] || fail
+    fi
+    [ -d "$SYS/class/net/wlan1" ] || fail
+    [ -L "$SYS/class/net/wlan0/phy80211" ] && [ -L "$SYS/class/net/wlan1/phy80211" ] || fail
+    station_phy=$(readlink -f "$SYS/class/net/wlan0/phy80211") || fail
+    ap_phy=$(readlink -f "$SYS/class/net/wlan1/phy80211") || fail
+    [ -n "$station_phy" ] && [ "$station_phy" = "$ap_phy" ] || fail
+    ipv4=$(ip -4 -o addr show dev wlan1) || fail
+    ipv6=$(ip -6 -o addr show dev wlan1 scope global) || fail
+    [ -z "$ipv4" ] && [ -z "$ipv6" ] || fail
+    "$IW" dev wlan1 info | awk '$1=="type" {if($2!="managed")exit 1;found=1} END {if(!found)exit 1}' || fail
+    "$IW" dev wlan1 link | awk '/^Not connected\./ {ok=1} END {if(!ok)exit 1}' || fail
+    [ ! -S /run/wpa_supplicant/wlan1 ] && [ ! -S /run/hostapd/wlan1 ] || fail
+    [ -z "$(pidof hostapd 2>/dev/null || :)" ] || fail
+    # Only the ordinary owned wlan0 supplicant may be running. Never read its
+    # private configuration or stop another application's radio process.
+    expected_wpa=$(cat "$WPA_PID" 2>/dev/null || :)
+    for candidate in $(pidof wpa_supplicant 2>/dev/null || :); do [ "$candidate" = "$expected_wpa" ] || fail; done
+    [ ! -f "$PROC/sys/net/ipv6/conf/wlan1/forwarding" ] || [ "$(cat "$PROC/sys/net/ipv6/conf/wlan1/forwarding")" = 0 ] || fail
+    flags=$(cat "$SYS/class/net/wlan1/flags")
+    echo $((flags & 1)) > "$RUN/was-up"
+    touch "$RUN/borrowed"
+    ip link set wlan1 down
+    "$IW" dev wlan1 set type __ap
+    ip addr add "$address/24" dev wlan1
+    ip link set wlan1 up
+}
+write_dnsmasq() {
+    prefix=${address%.*}
+    cat > "$RUN/dnsmasq.conf" <<EOF
+interface=wlan1
+bind-interfaces
+listen-address=$address
+port=0
+dhcp-range=$prefix.2,$prefix.2,255.255.255.0,5m
+dhcp-option=3
+dhcp-option=6
+dhcp-leasefile=/dev/null
+leasefile-ro
+quiet-dhcp
+user=nobody
+EOF
+}
+watch() {
+    address=${1:-}
+    case "$address" in 192.168.241.1|192.168.242.1|192.168.243.1|10.42.241.1|172.31.241.1) ;; *) fail ;; esac
+    channel=${2:-}; check_channel "$channel"
+    owner=${3:-}
+    case "$owner" in ''|*[!0-9]*) fail ;; esac
+    [ "$owner" -gt 1 ] && [ "$owner" = "$PPID" ] && running "$owner" || fail
+    owner_start=$(stamp "$owner")
+    IFS= read -r ssid && IFS= read -r password || fail
+    case "$ssid" in Q2-SignIn-*) ;; *) fail ;; esac
+    case "$ssid" in *[!a-zA-Z0-9-]*) fail ;; esac
+    [ "${#ssid}" -le 32 ] || fail
+    case "$password" in q2-*) ;; *) fail ;; esac
+    [ "${#password}" = 35 ] || fail
+    case "${password#q2-}" in *[!0-9a-f]*) fail ;; esac
+
+    # Install traps before taking the directory. During daemon fork/exec, defer
+    # honoring a stop until the PID and birth time are recorded.
+    stopping_requested=0
+    trap 'stopping_requested=1' HUP INT TERM
+    mkdir "$RUN" 2>/dev/null || fail
+    cleanup() {
+        trap - EXIT
+        rm -f "$RUN/ready"
+        ownership_uncertain=0
+        terminate "$RUN/dnsmasq.pid" dnsmasq || ownership_uncertain=1
+        terminate "$RUN/hostapd.pid" hostapd || ownership_uncertain=1
+        if [ -e "$RUN/borrowed" ] && [ "$ownership_uncertain" = 0 ]; then
+            ip link set wlan1 down || :
+            ip addr del "$address/24" dev wlan1 || :
+            "$IW" dev wlan1 set type managed || :
+            [ "$(cat "$RUN/was-up" 2>/dev/null)" != 1 ] || ip link set wlan1 up || :
+        fi
+        rm -f "$RUN/borrowed" "$RUN/was-up" "$RUN/hostapd.conf" "$RUN/hostapd.conf.new" "$RUN/dnsmasq.conf"
+        rmdir "$RUN/hostapd" 2>/dev/null || :
+        rmdir "$RUN" 2>/dev/null || :
+    }
+    trap cleanup EXIT
+    started=$(tick)
+    [ "$stopping_requested" = 0 ] || exit 0
+    prepare_interface
+    start_hostapd
+    unset password
+    write_dnsmasq
+    "$DNSMASQ" --keep-in-foreground --conf-file="$RUN/dnsmasq.conf" >/dev/null 2>&1 &
+    remember_launched "$RUN/dnsmasq.pid" "$!" dnsmasq
+    while [ "$stopping_requested" = 0 ] && running "$owner" &&
+          [ "$(stamp "$owner")" = "$owner_start" ] && [ "$(($(tick)-started))" -lt 195 ]; do
+        owned "$RUN/hostapd.pid" hostapd && owned "$RUN/dnsmasq.pid" dnsmasq || fail
+        # Let an independently initiated STA change end pairing immediately.
+        # Pairing itself never retunes or restarts wlan0.
+        current_frequency=$(station_frequency) || fail
+        [ "$current_frequency" = none ] || [ "$current_frequency" = "$chosen_frequency" ] || fail
+        if hostapd_ready; then
+            [ -e "$RUN/ready" ] || printf '%s %s\n' "$$" "$ssid" > "$RUN/ready"
+        else
+            [ ! -e "$RUN/ready" ] || fail
+        fi
+        sleep 1
+    done
+}
+case "${1:-}" in
+    frequencies) frequencies ;;
+    station-frequency) station_frequency ;;
+    watch) shift; watch "$@" ;;
+    *) fail ;;
+esac

@@ -1,0 +1,30 @@
+{
+  "buildroot": {
+    "version": "2026.08.1",
+    "url": "https://buildroot.org/downloads/buildroot-2026.08.1.tar.xz",
+    "sha256": "34fb7bea8a213ffde39cc02e61703391560f26e0850f03138c722d0b09880f2b",
+    "fork_commit": "53a6f8c6065bae077acf4f4eda5f47b9dbf37861",
+    "fork_url": "https://github.com/q2-nova/buildroot.git"
+  },
+  "qemu_commit": "702a95e8a6101f83e171423b1e7078b91a77d0b7",
+  "qemu_upstream_commit": "f8b2f64e2336a28bf0d50b6ef8a7d8c013e9bcf3",
+  "qemu_tag": "v10.1.0",
+  "kernel_build_container": "56c7e0a134af6c758ff63b88e864cdab60c91322f62fb090eca038978d507db3",
+  "kernel": {
+    "version": "7.3",
+    "url": "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.3.tar.xz",
+    "sha256": "87363c24f10e06321eb362765521094e94471f6bff8bce2d6b3e40f39f004953"
+  },
+  "source_date_epoch": 1793404800,
+  "rust_toolchain": "nightly-2026-11-12",
+  "qemu_url": "https://github.com/q2-nova/qemu.git",
+  "linux_production": {
+    "commit": "a67b4e3a4f6fa1de1bfae8ab8d6bfea2d80d34a7",
+    "url": "https://github.com/q2-nova/linux.git",
+    "defconfig": "shanling_q2_production_defconfig"
+  },
+  "qemu_installed": {
+    "commit": "8e082e052da25320cccd7356e0a441b863b38879",
+    "url": "https://github.com/q2-nova/qemu.git"
+  }
+}

@@ -1,0 +1,77 @@
+#!/bin/sh
+# Memory protection and the scalar inflate, once per boot before the supervisor and the player:
+# zram swap and no MGLRU working-set floor where the kernel has them
+# (pm-q2-perf-mem), then the thrash guard (os/probes/memory-guard.c). Started
+# by the player service, never stopped by it.
+grep -qw q2.diagnostic=1 /proc/cmdline && exit 0
+# 24 MiB of swap, about the player's and tailscaled's anonymous memory
+# (24-26 MB on V0.123); at lzo-rle's 2.5-3.5:1 it holds that in 7-10 MB.
+# mem_limit caps the compressed store at 12 MiB if pages compress worse.
+ZRAM_SIZE=24M
+ZRAM_LIMIT=12M
+ZRAM_ALGORITHM=lzo-rle
+# 0: no MGLRU working-set floor. At 1000, kswapd asked the OOM killer (order 0,
+# GFP_KERNEL) under heavy streaming reads with about 80 MB available, three
+# kills in two minutes on V0.125 (docs/bugs/thrash-watchdog-reset.md).
+MIN_TTL_MS=0
+zram_start() {
+    z=/sys/block/zram0
+    [ -e "$z/disksize" ] || return 0
+    grep -q '^/dev/zram0 ' /proc/swaps && return 0
+    if [ "$(cat "$z/disksize")" = 0 ]; then
+        echo "$ZRAM_ALGORITHM" > "$z/comp_algorithm" &&
+            echo "$ZRAM_SIZE" > "$z/disksize" &&
+            echo "$ZRAM_LIMIT" > "$z/mem_limit" || { echo 'zram: setup failed'; return 0; }
+    fi
+    mkswap /dev/zram0 > /dev/null && swapon /dev/zram0 || { echo 'zram: swapon failed'; return 0; }
+    echo "Q2_ZRAM_SWAP size=$ZRAM_SIZE limit=$ZRAM_LIMIT algorithm=$(sed 's/.*\[\(.*\)\].*/\1/' "$z/comp_algorithm")"
+}
+# tmpfs pages are not file cache: bound /run and /tmp (a mount without size=
+# may take half of RAM; 32 MB of tmpfs stopped the Q2,
+# docs/bugs/thrash-watchdog-reset.md). A release keeps the base's recovery
+# initramfs, whose bootstrap makes these mounts, so the bound is applied here,
+# once per boot: a rig that raised /run for its session keeps its size across
+# player restarts.
+tmpfs_bound() {
+    [ ! -e /run/q2/tmpfs-bounded ] || return 0
+    mount -o remount,size=8m /run || echo 'tmpfs: /run bound not applied'
+    mount -o remount,size=24m /tmp || echo 'tmpfs: /tmp bound not applied'
+    : > /run/q2/tmpfs-bounded
+    echo "Q2_TMPFS_BOUND run=$(df -k /run | awk 'NR==2{print $2}')k tmp=$(df -k /tmp | awk 'NR==2{print $2}')k"
+}
+# Scalar squashfs inflate (docs/bugs/thrash-watchdog-reset.md): with both
+# threads of the core running, the MSA inflate (kernel MSA sections of up
+# to milliseconds) stops the Q2 about once per 100 s of loop-on-card reads.
+# 2 and 0 are the variants the parameters document as the MSA ones'
+# fallback. The DMA refresh and the NAND bounce copy keep their MSA paths:
+# 480 s of the same load with only the inflate scalar had no stop. Until
+# this runs, a boot reads its root with the kernel's defaults: scalar from
+# pm-q2-perf-v126 (patch 0184), MSA in older kernels.
+inflate_scalar() {
+    m=/sys/module/zlib_inflate/parameters
+    [ ! -w $m/fast_variant ] || echo 2 > $m/fast_variant
+    [ ! -w $m/adler_variant ] || echo 0 > $m/adler_variant
+    echo "Q2_INFLATE_SCALAR fast_variant=$(cat $m/fast_variant 2>/dev/null) adler_variant=$(cat $m/adler_variant 2>/dev/null)"
+}
+case "$1" in
+start)
+    mkdir -p /run/q2
+    tmpfs_bound >> /run/q2/memory-guard.log 2>&1
+    # /run/q2/inflate-keep: a test leaves the variants as it set them.
+    [ -e /run/q2/inflate-keep ] || inflate_scalar >> /run/q2/memory-guard.log 2>&1
+    zram_start >> /run/q2/memory-guard.log 2>&1
+    # MGLRU: written explicitly, so a floor a rig or an older release set is
+    # cleared; thrash is left to the guard.
+    [ ! -w /sys/kernel/mm/lru_gen/min_ttl_ms ] || echo "$MIN_TTL_MS" > /sys/kernel/mm/lru_gen/min_ttl_ms
+    [ -x /usr/sbin/q2-memory-guard ] || exit 0
+    # Once per boot: the player service starts it before each supervisor start.
+    [ -s /run/q2/memory-guard.pid ] && kill -0 "$(cat /run/q2/memory-guard.pid)" 2>/dev/null && exit 0
+    /usr/sbin/q2-memory-guard >> /run/q2/memory-guard.log 2>&1 &
+    echo $! > /run/q2/memory-guard.pid
+    ;;
+stop)
+    [ -f /run/q2/memory-guard.pid ] && kill -TERM "$(cat /run/q2/memory-guard.pid)" 2>/dev/null
+    rm -f /run/q2/memory-guard.pid
+    ;;
+esac
+exit 0

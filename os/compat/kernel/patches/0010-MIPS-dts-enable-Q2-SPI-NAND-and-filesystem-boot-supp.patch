@@ -1,0 +1,95 @@
+From de7eb3b3e41f6644ade8bfe4142c05241f4179de Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 11:23:01 -0500
+Subject: [PATCH 10/10] MIPS: dts: enable Q2 SPI NAND and filesystem boot
+ support
+
+Wire SFC at 0x13440000, interrupt 7, and PE16..21 from the stock V1.32
+device tree. Enable spi-nand, MTD block devices, command-line partitions
+and squashfs for a generated root-filesystem boot fixture.
+
+Keep the controller at 25 MHz for bring-up. Do not encode an assumed
+on-device partition map: emulator tests supply their synthetic layout
+on the kernel command line. The stock binary reads a separate NAND
+partition table; recovery/bootloader integration is not part of this patch.
+
+Validated on the Q2 emulator with no embedded initramfs: NAND squashfs
+mount, generated init and shell, both CPU timers, disposable MTD erase/
+program/readback, SDHCI block I/O, CW2015 and all five buttons.
+---
+ arch/mips/boot/dts/ingenic/shanling-q2.dts | 18 ++++++++++++++++++
+ arch/mips/boot/dts/ingenic/x2000.dtsi      | 11 +++++++++++
+ arch/mips/configs/shanling_q2_defconfig    |  8 ++++++++
+ 3 files changed, 37 insertions(+)
+
+diff --git a/arch/mips/boot/dts/ingenic/shanling-q2.dts b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+index 4e2c80635..f3367107b 100644
+--- a/arch/mips/boot/dts/ingenic/shanling-q2.dts
++++ b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+@@ -88,6 +88,10 @@ &uart3 {
+ };
+ 
+ &pinctrl {
++	sfc_pins: sfc-pins {
++		function = "sfc";
++		groups = "sfc-data-if0-e", "sfc-clk-e", "sfc-ce-e";
++	};
+ 	i2c0_pins: i2c0-pins {
+ 		function = "i2c0";
+ 		groups = "i2c0-data";
+@@ -154,3 +158,17 @@ &msc2 {
+ 	/* Start conservatively; UHS tuning needs hardware validation. */
+ 	max-frequency = <50000000>;
+ };
++
++&sfc {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&sfc_pins>;
++	flash@0 {
++		compatible = "spi-nand";
++		reg = <0>;
++		spi-max-frequency = <25000000>;
++		spi-rx-bus-width = <4>;
++		spi-tx-bus-width = <4>;
++		/* Partition discovery remains external: do not guess device layout. */
++	};
++};
+diff --git a/arch/mips/boot/dts/ingenic/x2000.dtsi b/arch/mips/boot/dts/ingenic/x2000.dtsi
+index 884e35ae1..819e61fea 100644
+--- a/arch/mips/boot/dts/ingenic/x2000.dtsi
++++ b/arch/mips/boot/dts/ingenic/x2000.dtsi
+@@ -76,6 +76,17 @@ ccu: core-control@12200000 {
+ 		reg = <0x12200000 0x2000>;
+ 	};
+ 
++	sfc: spi@13440000 {
++		compatible = "ingenic,x2000-sfc";
++		reg = <0x13440000 0x10000>;
++		interrupt-parent = <&intc>;
++		interrupts = <7>;
++		clocks = <&cgu X2000_CLK_SFC>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++		status = "disabled";
++	};
++
+ 	intc: interrupt-controller@12300000 {
+ 		compatible = "ingenic,x2000-intc";
+ 		/* one bank per core, 0x100 apart */
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index cbbe06008..80ead7448 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -55,3 +55,11 @@ CONFIG_MMC_BLOCK=y
+ CONFIG_MMC_SDHCI=y
+ CONFIG_MMC_SDHCI_PLTFM=y
+ CONFIG_MMC_SDHCI_INGENIC=y
++CONFIG_SPI=y
++CONFIG_SPI_INGENIC_SFC=y
++CONFIG_MTD=y
++CONFIG_MTD_BLOCK=y
++CONFIG_MTD_CMDLINE_PARTS=y
++CONFIG_MTD_SPI_NAND=y
++CONFIG_SQUASHFS=y
++CONFIG_SQUASHFS_XZ=y

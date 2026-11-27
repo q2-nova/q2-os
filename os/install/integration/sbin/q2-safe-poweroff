@@ -1,0 +1,131 @@
+#!/bin/sh
+# Installed shell PID1 needs an explicit orderly shutdown before poweroff -f.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RUN=/run/q2
+PROC=/proc
+SERVICES=/sbin/q2-installed-services
+WIFI=/usr/libexec/q2-network/wifi
+TIME=/usr/libexec/q2-network/time
+SD=/mnt/mmc
+STATE=/state
+USERDATA=/mnt/userdata
+HISTORY=/state/power-history
+POWEROFF=/sbin/poweroff
+USB_AUTO=/usr/sbin/q2-usb-auto
+WIFI_RUN=/run/q2-network
+TIME_RUN=/run/q2-time
+umask 077
+fail() { echo "q2-safe-poweroff: $*" >&2; exit 1; }
+mounted() { awk -v target="$1" '$2 == target { print $1 " " $3 }' "$PROC/mounts"; }
+
+validate_storage() {
+    if [ -d "$RUN/usb-storage" ]; then
+        [ "$(cat "$RUN/usb-storage/phase" 2>/dev/null)" = local-ready ] ||
+            fail 'USB storage handoff is active; eject and reclaim the card first'
+    fi
+    card=$(mounted "$SD")
+    case "$card" in ''|'/dev/mmcblk0p1 exfat'|'/dev/mmcblk0p1 vfat') ;;
+        *) fail 'unexpected card mount' ;; esac
+    state=$(mounted "$STATE")
+    userdata=$(mounted "$USERDATA")
+    case "$userdata" in ''|/dev/ubi[0-9]*_[0-9]*' ubifs') ;;
+        *) fail 'unexpected userdata mount' ;; esac
+    [ -z "$state" ] || [ "$state" = "$userdata" ] || fail 'unexpected internal state mount'
+    if [ -n "$state" ]; then
+        # Only the installed q2-mainline bind namespace belongs to this helper.
+        awk -v target="$STATE" '$5 == target && $4 == "/q2-mainline" { found=1 }
+            END { exit found ? 0 : 1 }' "$PROC/self/mountinfo" || fail 'unexpected state namespace'
+    fi
+    awk -v sd="$SD/" -v state="$STATE/" -v data="$USERDATA/" '
+        index($2, sd) == 1 || index($2, state) == 1 || index($2, data) == 1 { nested=1 }
+        END { exit nested ? 1 : 0 }' "$PROC/mounts" || fail 'unexpected nested storage mount'
+}
+
+shutdown_installed() {
+    usb_stopped=0; services_stopped=0; time_stopped=0; wifi_stopped=0
+    card_unmounted=0; state_unmounted=0; userdata_unmounted=0
+    wifi_running=0; time_running=0
+    [ ! -s "$WIFI_RUN/wpa.pid" ] || wifi_running=1
+    [ ! -s "$TIME_RUN/service.pid" ] || time_running=1
+    [ ! -x "$USB_AUTO" ] || usb_stopped=1
+    [ ! -x "$USB_AUTO" ] || "$USB_AUTO" stop || fail 'automatic USB manager stop failed'
+    # Freeze future ownership transitions before checking whether a host owns SD.
+    validate_storage
+    # One line in the power history root-init keeps (docs/bugs/q2-off-during-abba-02.md):
+    # an orderly shutdown, and who asked for it. Never blocks the shutdown.
+    if [ -n "$state" ]; then
+        { tail -n 63 "$HISTORY" 2>/dev/null
+          echo "safe-poweroff up=$(cut -d' ' -f1 "$PROC/uptime" 2>/dev/null) parent=$(tr '\0' ' ' < "$PROC/$PPID/cmdline" 2>/dev/null)"
+        } > "$HISTORY.new" 2>/dev/null && mv "$HISTORY.new" "$HISTORY" 2>/dev/null || :
+    fi
+    # This disarms the supervisor, cancels respawn, and waits for the player
+    # to save its database/configuration, release audio and stop Tailscale.
+    services_stopped=1
+    "$SERVICES" stop || fail 'player/supervisor stop failed'
+    [ ! -x "$TIME" ] || time_stopped=1
+    [ ! -x "$TIME" ] || "$TIME" stop || fail 'network time stop failed'
+    wifi_stopped=1
+    "$WIFI" down || fail 'owned Wi-Fi stop failed'
+    sync || fail 'storage sync failed'
+    if [ -n "$card" ]; then umount "$SD" || fail 'card unmount failed'; card_unmounted=1; fi
+    if [ -n "$state" ]; then umount "$STATE" || fail 'state bind unmount failed'; state_unmounted=1; fi
+    if [ -n "$userdata" ]; then umount "$USERDATA" || fail 'userdata unmount failed'; userdata_unmounted=1; fi
+    sync || fail 'final storage sync failed'
+    echo powering-off > "$RUN/poweroff-status"
+    # Ordinary BusyBox poweroff only signals PID1, which is a shell here.
+    "$POWEROFF" -f || fail 'kernel poweroff request failed'
+}
+
+restore_after_failure() {
+    # Restore only resources that this operation actually changed. Retain a
+    # failed status when storage restoration fails; never launch over unmounted
+    # state or let card media silently spill into the underlying filesystem.
+    restored=1
+    if [ "${userdata_unmounted:-0}" = 1 ]; then
+        mount -t ubifs "${userdata% ubifs}" "$USERDATA" || restored=0
+    fi
+    if [ "$restored" = 1 ] && [ "${state_unmounted:-0}" = 1 ]; then
+        mount --bind "$USERDATA/q2-mainline" "$STATE" || restored=0
+    fi
+    if [ "${card_unmounted:-0}" = 1 ]; then
+        case "$card" in
+            *' exfat') mount -t exfat -o nosuid,nodev,noexec /dev/mmcblk0p1 "$SD" || restored=0 ;;
+            *' vfat') mount -t vfat -o nosuid,nodev,noexec /dev/mmcblk0p1 "$SD" || restored=0 ;;
+            *) restored=0 ;;
+        esac
+    fi
+    if [ "$restored" = 1 ]; then
+        if [ "${wifi_stopped:-0}" = 1 ] && [ "$wifi_running" = 1 ]; then "$WIFI" up || restored=0; fi
+        if [ "${time_stopped:-0}" = 1 ] && [ "$time_running" = 1 ]; then "$TIME" start || restored=0; fi
+        if [ "${services_stopped:-0}" = 1 ]; then "$SERVICES" start || restored=0; fi
+        if [ "${usb_stopped:-0}" = 1 ]; then "$USB_AUTO" start || restored=0; fi
+    fi
+    [ "$restored" = 1 ] || echo 'q2-safe-poweroff: recovery incomplete; diagnostics retained' >&2
+}
+
+main() {
+    [ "$#" = 0 ] || fail 'usage: q2-safe-poweroff'
+    [ "$(id -u)" = 0 ] || fail 'root is required'
+    cd /
+    mkdir -p "$RUN"
+    lock_owned=0
+    cleanup() {
+        result=$?
+        trap - EXIT
+        if [ "$result" != 0 ]; then
+            restore_after_failure
+            echo failed > "$RUN/poweroff-status"
+        fi
+        [ "$lock_owned" = 0 ] || rmdir "$RUN/usb-storage.lock"
+        exit "$result"
+    }
+    trap cleanup EXIT
+    trap 'exit 1' HUP INT TERM
+    mkdir "$RUN/usb-storage.lock" 2>/dev/null || fail 'storage operation is busy'
+    lock_owned=1
+    echo stopping > "$RUN/poweroff-status"
+    shutdown_installed
+}
+if [ "${Q2_POWEROFF_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

@@ -1,0 +1,51 @@
+From: Q2 OS integration
+Subject: [PATCH] watchdog: x2000: provide an orderly machine restart
+
+Normal Buildroot reboot halted after the application supervisor explicitly
+stopped the watchdog. Arm a bounded one-second reset in the watchdog core's
+restart callback. Keep the existing inherited deadline unchanged on kexec.
+Validation is emulation only; no physical device was accessed.
+
+--- a/drivers/watchdog/ingenic-x2000-wdt.c
++++ b/drivers/watchdog/ingenic-x2000-wdt.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* X2000 TCU watchdog: RTC counter and CLRZ protocol from Ingenic's SDK. */
+ #include <linux/clk.h>
++#include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -87,5 +88,16 @@
+ }
+ 
++/* Reboot must also work after an orderly userspace watchdog disarm.
++ * This callback runs only on machine restart, never during kexec. */
++static int x2000_wdt_restart(struct watchdog_device *wdd,
++                            unsigned long action, void *data)
++{
++	x2000_wdt_set_timeout(wdd, 1);
++	x2000_wdt_start(wdd);
++	mdelay(1500);
++	return 0;
++}
++
+ static const struct watchdog_info x2000_wdt_info = {
+ 	.identity = "Ingenic X2000 watchdog",
+ 	.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE,
+@@ -98,6 +110,7 @@
+ 	.ping = x2000_wdt_ping,
+ 	.set_timeout = x2000_wdt_set_timeout,
+ 	.get_timeleft = x2000_wdt_get_timeleft,
++	.restart = x2000_wdt_restart,
+ };
+ 
+ static void x2000_wdt_release_clock(void *data)
+@@ -149,6 +162,7 @@
+ 	wdt->wdd.timeout = 15;
+ 	watchdog_set_drvdata(&wdt->wdd, wdt);
+ 	watchdog_set_nowayout(&wdt->wdd, nowayout);
++	watchdog_set_restart_priority(&wdt->wdd, 128);
+ 	ret = watchdog_init_timeout(&wdt->wdd, 0, dev);
+ 	if (ret)
+ 		return ret;

@@ -1,0 +1,87 @@
+#!/bin/sh
+# Own the USB-only display without reading card or player configuration.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RUN=/run/q2
+PROC=/proc
+STATUS_HELPER=/usr/sbin/q2-usb-status
+STATUS_FALLBACK=/run/q2/q2-usb-status
+LOG=/run/log/usb-status
+umask 077
+fail() { echo "q2-usb-status-control: $*" >&2; exit 1; }
+alive() {
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ ! -r "$PROC/$pid/status" ] ||
+        ! awk '/^State:/ && ($2 == "Z" || $2 == "X") { dead=1 } END { exit dead ? 0 : 1 }' "$PROC/$pid/status"
+}
+owned() {
+    [ -s "$RUN/usb-status.pid" ] || return 1
+    pid=$(cat "$RUN/usb-status.pid")
+    case "$pid" in ''|*[!0-9]*) fail 'invalid status PID' ;; esac
+    [ "$pid" -gt 1 ] || fail 'invalid status PID'
+    alive || return 1
+    actual=$(readlink "$PROC/$pid/exe") || fail 'cannot identify active status process'
+    actual=${actual%" (deleted)"}
+    for candidate in "$STATUS_HELPER" "$STATUS_FALLBACK"; do
+        expected=$(readlink -f "$candidate" 2>/dev/null || :)
+        [ "$actual" != "$expected" ] || return 0
+    done
+    fail 'status PID belongs to another executable; refusing to signal it'
+}
+stop_status() {
+    if owned; then
+        if ! kill -TERM "$pid" 2>/dev/null; then
+            if alive; then fail 'cannot stop status process'; fi
+        fi
+        n=0
+        while alive; do
+            [ "$n" -lt 100 ] || fail 'status process did not release the display'
+            sleep .05; n=$((n+1))
+        done
+    fi
+    rm -f "$RUN/usb-status.pid" "$RUN/usb-status.exe" "$RUN/usb-status.ready"
+}
+launch_status() {
+    "$exe" </dev/null >> "$LOG" 2>&1 &
+    launched=$!
+}
+start_status() {
+    [ -f "$RUN/usb-storage/phase" ] || fail 'there is no USB storage session'
+    case "$(cat "$RUN/usb-storage/phase")" in
+        preparing|detached|armed|exported|returning|local-ready) ;;
+        *) fail 'unknown USB storage phase' ;;
+    esac
+    if owned; then
+        [ "$(cat "$RUN/usb-status.ready" 2>/dev/null)" = "$pid" ] || fail 'status process is not ready'
+        return
+    fi
+    rm -f "$RUN/usb-status.pid" "$RUN/usb-status.exe" "$RUN/usb-status.ready"
+    exe=$STATUS_HELPER
+    [ -x "$exe" ] || exe=$STATUS_FALLBACK
+    [ -x "$exe" ] || fail 'USB display helper is absent'
+    mkdir -p "${LOG%/*}"
+    launch_status
+    printf '%s\n' "$launched" > "$RUN/usb-status.pid"
+    readlink -f "$exe" > "$RUN/usb-status.exe"
+    n=0
+    while [ "$(cat "$RUN/usb-status.ready" 2>/dev/null)" != "$launched" ]; do
+        pid=$launched
+        if ! alive || [ "$n" -ge 100 ]; then
+            stop_status
+            fail 'USB display did not present; see RAM status log'
+        fi
+        sleep .05; n=$((n+1))
+    done
+}
+main() {
+    [ "$(id -u)" = 0 ] || fail 'root is required'
+    [ "$#" = 1 ] || fail 'usage: q2-usb-status-control start|show|stop'
+    case "$1" in start|show|stop) ;; *) fail 'unknown action' ;; esac
+    mkdir -p "$RUN"
+    mkdir "$RUN/usb-status.lock" 2>/dev/null || fail 'display lifecycle operation is busy'
+    trap 'rmdir "$RUN/usb-status.lock"' EXIT
+    trap 'exit 1' HUP INT TERM
+    case "$1" in start|show) start_status ;; stop) stop_status ;; esac
+}
+if [ "${Q2_USB_STATUS_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi

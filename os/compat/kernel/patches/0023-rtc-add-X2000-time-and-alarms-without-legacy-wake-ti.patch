@@ -1,0 +1,138 @@
+From a6f3ff0902f4a2d32948cb86fcfb45b34053911c Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 14:26:37 -0500
+Subject: [PATCH 23/23] rtc: add X2000 time and alarms without legacy wake
+ timing
+
+Use the SDK X2000 register layout and stock write-unlock sequence for the existing Ingenic counter and alarm interface. Preserve firmware hibernate timing because the X2000 reset counter differs from the older SoCs; do not describe unsupported clock output or system power control.
+
+Clear a masked stale alarm before programming its replacement and report only enabled IRQ sources. Q2 emulator tests cover post-2038 dates, unsigned wrap, alarm masking and exact IRQ counts in both normal and fixed-icount modes. Physical oscillator, retention and hibernate wakeup remain unqualified.
+---
+ .../devicetree/bindings/rtc/ingenic,rtc.yaml  | 12 ++++++++++
+ arch/mips/boot/dts/ingenic/x2000.dtsi         |  9 ++++++++
+ arch/mips/configs/shanling_q2_defconfig       |  2 ++
+ drivers/rtc/rtc-jz4740.c                      | 22 ++++++++++++++++---
+ 4 files changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/rtc/ingenic,rtc.yaml b/Documentation/devicetree/bindings/rtc/ingenic,rtc.yaml
+index de9879bdb..2d8ae6ec0 100644
+--- a/Documentation/devicetree/bindings/rtc/ingenic,rtc.yaml
++++ b/Documentation/devicetree/bindings/rtc/ingenic,rtc.yaml
+@@ -23,12 +23,24 @@ allOf:
+       properties:
+         "#clock-cells": false
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: ingenic,x2000-rtc
++    then:
++      properties:
++        system-power-controller: false
++        ingenic,reset-pin-assert-time-ms: false
++        ingenic,min-wakeup-pin-assert-time-ms: false
++
+ properties:
+   compatible:
+     oneOf:
+       - enum:
+           - ingenic,jz4740-rtc
+           - ingenic,jz4760-rtc
++          - ingenic,x2000-rtc
+       - items:
+           - const: ingenic,jz4725b-rtc
+           - const: ingenic,jz4740-rtc
+diff --git a/arch/mips/boot/dts/ingenic/x2000.dtsi b/arch/mips/boot/dts/ingenic/x2000.dtsi
+index 40e198767..a2310200e 100644
+--- a/arch/mips/boot/dts/ingenic/x2000.dtsi
++++ b/arch/mips/boot/dts/ingenic/x2000.dtsi
+@@ -68,6 +68,15 @@ watchdog: watchdog@10002000 {
+ 		clock-names = "tcu", "rtc";
+ 	};
+ 
++	rtc: rtc@10003000 {
++		compatible = "ingenic,x2000-rtc";
++		reg = <0x10003000 0x4c>;
++		interrupt-parent = <&intc>;
++		interrupts = <32>;
++		clocks = <&rtclk>;
++		clock-names = "rtc";
++	};
++
+ 	ost: timer@12000000 {
+ 		compatible = "ingenic,x2000-ost";
+ 		/* global 64-bit counter, then the per-core timers */
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index a58db1cc0..7024bea16 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -97,3 +97,5 @@ CONFIG_INGENIC_X2000_WDT=y
+ # CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED is not set
+ CONFIG_INPUT_MISC=y
+ CONFIG_INPUT_SHANLING_Q2_WHEEL=y
++CONFIG_RTC_CLASS=y
++CONFIG_RTC_DRV_JZ4740=y
+diff --git a/drivers/rtc/rtc-jz4740.c b/drivers/rtc/rtc-jz4740.c
+index 11fce47be..3dc30e469 100644
+--- a/drivers/rtc/rtc-jz4740.c
++++ b/drivers/rtc/rtc-jz4740.c
+@@ -55,6 +55,7 @@ enum jz4740_rtc_type {
+ 	ID_JZ4740,
+ 	ID_JZ4760,
+ 	ID_JZ4780,
++	ID_X2000,
+ };
+ 
+ struct jz4740_rtc {
+@@ -204,6 +205,14 @@ static int jz4740_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
+ 	struct jz4740_rtc *rtc = dev_get_drvdata(dev);
+ 	uint32_t secs = lower_32_bits(rtc_tm_to_time64(&alrm->time));
+ 
++	/* A masked alarm can leave AF pending. Clear it before programming a
++	 * new deadline so enabling the IRQ cannot deliver the old alarm.
++	 */
++	ret = jz4740_rtc_ctrl_set_bits(rtc, JZ_RTC_CTRL_AE |
++				     JZ_RTC_CTRL_AF_IRQ | JZ_RTC_CTRL_AF, false);
++	if (ret)
++		return ret;
++
+ 	ret = jz4740_rtc_reg_write(rtc, JZ_REG_RTC_SEC_ALARM, secs);
+ 	if (!ret)
+ 		ret = jz4740_rtc_ctrl_set_bits(rtc,
+@@ -234,10 +243,12 @@ static irqreturn_t jz4740_rtc_irq(int irq, void *data)
+ 
+ 	ctrl = jz4740_rtc_reg_read(rtc, JZ_REG_RTC_CTRL);
+ 
+-	if (ctrl & JZ_RTC_CTRL_1HZ)
++	if ((ctrl & (JZ_RTC_CTRL_1HZ | JZ_RTC_CTRL_1HZ_IRQ)) ==
++	    (JZ_RTC_CTRL_1HZ | JZ_RTC_CTRL_1HZ_IRQ))
+ 		events |= (RTC_UF | RTC_IRQF);
+ 
+-	if (ctrl & JZ_RTC_CTRL_AF)
++	if ((ctrl & (JZ_RTC_CTRL_AF | JZ_RTC_CTRL_AF_IRQ)) ==
++	    (JZ_RTC_CTRL_AF | JZ_RTC_CTRL_AF_IRQ))
+ 		events |= (RTC_AF | RTC_IRQF);
+ 
+ 	rtc_update_irq(rtc->rtc, 1, events);
+@@ -264,6 +275,7 @@ static const struct of_device_id jz4740_rtc_of_match[] = {
+ 	{ .compatible = "ingenic,jz4760-rtc", .data = (void *)ID_JZ4760 },
+ 	{ .compatible = "ingenic,jz4770-rtc", .data = (void *)ID_JZ4780 },
+ 	{ .compatible = "ingenic,jz4780-rtc", .data = (void *)ID_JZ4780 },
++	{ .compatible = "ingenic,x2000-rtc", .data = (void *)ID_X2000 },
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(of, jz4740_rtc_of_match);
+@@ -382,7 +394,11 @@ static int jz4740_rtc_probe(struct platform_device *pdev)
+ 	rtc->rtc->range_max = U32_MAX;
+ 
+ 	rate = clk_get_rate(clk);
+-	jz4740_rtc_set_wakeup_params(rtc, np, rate);
++	/* X2000 has a different hibernate reset counter layout. Preserve
++	 * firmware wake/reset timing until that path is supported.
++	 */
++	if (rtc->type != ID_X2000)
++		jz4740_rtc_set_wakeup_params(rtc, np, rate);
+ 
+ 	/* Each 1 Hz pulse should happen after (rate) ticks */
+ 	jz4740_rtc_reg_write(rtc, JZ_REG_RTC_REGULATOR, rate - 1);

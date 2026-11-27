@@ -1,0 +1,53 @@
+/* Diagnostic update transport. This is the device-verified stock ota location. */
+/ {
+	aliases { mmc0 = &msc2; };
+	vcc_sd: regulator-sd {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-sd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&gpa 12 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+};
+&pinctrl {
+	/* PA12 controls card power from the board's 1.8 V GPIO A domain. */
+	ingenic,gpa-voltage-microvolt = <1800000>;
+	msc2_pins: mmc2-pins {
+		function = "mmc2";
+		groups = "mmc2-1bit", "mmc2-4bit";
+	};
+	sfc_pins: sfc-pins {
+		function = "sfc";
+		groups = "sfc-data-if0-e", "sfc-clk-e", "sfc-ce-e";
+	};
+};
+&msc2 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&msc2_pins>;
+	vmmc-supply = <&vcc_sd>;
+	bus-width = <4>;
+	broken-cd;
+	cap-sd-highspeed;
+	no-1-8-v;
+	max-frequency = <50000000>;
+};
+&sfc {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&sfc_pins>;
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+		spi-rx-bus-width = <4>;
+		spi-tx-bus-width = <4>;
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			partition@6420000 { label = "ota"; reg = <0x6420000 0x20000>; };
+		};
+	};
+};

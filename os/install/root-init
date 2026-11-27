@@ -1,0 +1,159 @@
+#!/bin/sh
+# Installed PID1. Filesystems were prepared by the minimal rescue initramfs.
+loopback_setup() {
+    # ifconfig assigns the same address on repeated calls without duplicate-add
+    # errors. Local Tailscale proxies require this before any app/network worker.
+    ifconfig lo 127.0.0.1 netmask 255.0.0.0 up
+}
+bootmark() {
+    file=/run/q2/boot-times
+    [ ! -L "$file" ] && { [ ! -e "$file" ] || { [ -f "$file" ] && [ "$(wc -c < "$file")" -lt 65408 ]; }; } || return 0
+    read -r uptime idle 2>/dev/null < /proc/uptime || return 0
+    case "$uptime" in *.*) ;; *) return 0 ;; esac
+    case "${uptime%.*}:${uptime#*.}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+    printf '%s %s\n' "$uptime" "$1" >> "$file" 2>/dev/null || :
+}
+# Explicit generated mutable-userdata context, admitted before first player.
+# Missing marker is a production no-op; no owner settings are opened/merged.
+telemetry_fixture_setup() {
+    fixture=/state/.telemetry-fixture
+    [ -e "$fixture" ] || [ -L "$fixture" ] || return 0
+    [ -d "$fixture" ] && [ ! -L "$fixture" ] || return 1
+    for item in owner overlay.toml; do
+        [ -f "$fixture/$item" ] && [ ! -L "$fixture/$item" ] || return 1
+        # The installed BusyBox has numeric ls but no stat applet. Only the
+        # fixed mode/UID columns are used; filenames and timestamps are ignored.
+        metadata=$(LC_ALL=C ls -ln "$fixture/$item") || return 1
+        set -- $metadata
+        # GNU ls adds '.' for a security context; target BusyBox does not.
+        mode=${1%.}
+        [ "$mode:$3" = "-rw-------:$(id -u)" ] || return 1
+    done
+    [ "$(wc -c < "$fixture/owner")" -le 128 ] || return 1
+    [ "$(wc -c < "$fixture/overlay.toml")" -le 1024 ] || return 1
+    [ "$(wc -l < "$fixture/owner")" = 1 ] || return 1
+    read -r magic schema run_id digest extra < "$fixture/owner"
+    [ "$magic" = Q2_TELEMETRY_FIXTURE ] && [ "$schema" = 1 ] && [ -z "$extra" ] || return 1
+    printf '%s\n' "$run_id" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || return 1
+    printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || return 1
+    [ "$(sha256sum "$fixture/overlay.toml" | cut -d' ' -f1)" = "$digest" ] || return 1
+    overlay=/run/q2/telemetry-test.toml
+    [ ! -e "$overlay" ] && [ ! -L "$overlay" ] || return 1
+    (set -C; cat "$fixture/overlay.toml" > "$overlay") || return 1
+    chmod 600 "$overlay"
+}
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+hostname q2-mainline
+umask 077
+mkdir -p /run/log /run/q2 /run/q2nd /mnt/mmc /state
+exec </dev/ttyS3 >/dev/ttyS3 2>&1
+bootmark installed-init
+# Release sysctls (console log level) before any driver or network burst.
+[ ! -r /etc/sysctl.conf ] || sysctl -q -p /etc/sysctl.conf > /dev/null 2>&1 || :
+loopback_ready=0
+if loopback_setup; then
+    loopback_ready=1
+else
+    echo 'Loopback setup failed; player startup withheld, diagnostics retained.'
+fi
+bootmark loopback-complete
+# Read the player's binary, libraries, ALSA configuration and fallback fonts
+# into the page cache while bring-up and state setup run (a cold player
+# start measured 4.26 s against 0.76 s warm; startup hunt 2026-11-10).
+player_read_ahead() {
+    # BEGIN Q2 PLAYER READ-AHEAD
+    nice -n 10 cat /usr/bin/q2nd "$@"
+    # END Q2 PLAYER READ-AHEAD
+}
+player_read_ahead /usr/lib/libasound.so.2.0.0 /usr/lib/libq2platform.so \
+    /usr/share/alsa/alsa.conf /usr/share/fonts/dejavu/DejaVuSans.ttf \
+    /usr/share/q2nd/fonts/*.ttf \
+    /usr/share/fonts/noto-emoji/NotoEmoji-Regular.ttf > /dev/null 2>&1 &
+# Driver bring-up does not consume /state. Keep its qualified module ordering
+# intact while existing UBI/state setup runs, then join this exact child before
+# clocks/network workers and launcher admission. Diagnostic USB still follows
+# state setup and is not delayed behind this join.
+peripherals_pid=
+peripherals_ready=0
+if [ "$loopback_ready" = 1 ]; then
+    bootmark peripherals-begin
+    /sbin/q2-player-bringup > /run/log/bringup 2>&1 &
+    peripherals_pid=$!
+fi
+bootmark state-begin
+/sbin/q2-state > /run/log/state 2>&1 || echo 'Internal state unavailable; diagnostics retained.'
+bootmark state-complete
+telemetry_ready=0
+if telemetry_fixture_setup; then telemetry_ready=1; else echo Q2_TELEMETRY_FIXTURE_REFUSED; fi
+# Retained crash evidence is copied after state admission, without holding up
+# diagnostics or player startup. The helper acknowledges only durable archives.
+if [ -x /sbin/q2-pstore ]; then
+    /sbin/q2-pstore > /run/log/pstore 2>&1 &
+fi
+bootmark diagnostic-usb-requested
+/sbin/q2-diagnostic-usb && {
+    bootmark diagnostic-usb-ready
+    /sbin/q2-diagnostic-ssh > /run/log/ssh 2>&1
+} &
+if [ -n "$peripherals_pid" ] && wait "$peripherals_pid"; then
+    peripherals_ready=1
+    bootmark peripherals-complete
+fi
+# Start the supplicant now when the player last wanted Wi-Fi (q2nd keeps
+# /state/network/autostart for Wi-Fi On without Offline Mode): association
+# overlaps the player's start, whose own `up` then returns at once. DHCP stays
+# with the player (docs/startup-ideas.md, 1b).
+if [ "$peripherals_ready" = 1 ] && [ "$(cat /run/q2/state-status 2>/dev/null)" = ready ] &&
+    [ -e /state/network/autostart ] && [ -x /usr/libexec/q2-network/wifi ]; then
+    bootmark wifi-early-requested
+    # Niced: on V0.57 the early start may have cost the first frame about
+    # 1 s (three boots); association still overlaps the player's start.
+    nice -n 10 /usr/libexec/q2-network/wifi up > /run/log/wifi-early 2>&1 &
+fi
+# Power history (docs/bugs/q2-off-during-abba-02.md): the PMIC's power-on and
+# power-off sources (AXP2101 0x20/0x21) at each boot, beside q2-safe-poweroff's
+# own line, tell an orderly shutdown from a key or fault off. Last 64 lines.
+if [ "$peripherals_ready" = 1 ] && [ "$(cat /run/q2/state-status 2>/dev/null)" = ready ]; then
+    # i2c-dev is a module nothing else loads at boot (V0.59 recorded "unread").
+    (/sbin/modprobe i2c-dev 2>/dev/null || :
+     on=$(/usr/sbin/i2cget -f -y 6 0x34 0x20 2>/dev/null) || on=unread
+     off=$(/usr/sbin/i2cget -f -y 6 0x34 0x21 2>/dev/null) || off=unread
+     h=/state/power-history
+     { tail -n 63 "$h" 2>/dev/null; echo "boot up=$(cut -d' ' -f1 /proc/uptime) rtc=$(date +%s) on=$on off=$off"; } > "$h.new" &&
+         mv "$h.new" "$h") > /dev/null 2>&1 &
+fi
+bootmark clock-floor-begin
+/etc/init.d/S02q2-clock start
+bootmark clock-floor-returned
+bootmark clock-trust-begin
+/etc/init.d/S25q2-clock-trust start
+bootmark clock-trust-returned
+bootmark clock-network-begin
+[ ! -x /etc/init.d/S26q2-network-clock ] || /etc/init.d/S26q2-network-clock start
+bootmark clock-network-returned
+bootmark clock-services-complete
+if [ "$peripherals_ready" = 1 ] && [ "$telemetry_ready" = 1 ]; then
+    if [ -x /sbin/q2-installed-services ]; then
+        # Complete the serialized launcher-admission handshake before enabling
+        # USB automation; a background start used to race an export's stop.
+        bootmark services-admission-begin
+        /sbin/q2-installed-services start > /run/log/services 2>&1 ||
+            echo 'Application startup failed; diagnostics retained.'
+        bootmark services-admission-returned
+    else
+        echo 'Application integration hook missing; diagnostics only.'
+    fi
+else
+    echo 'Peripheral bring-up failed; diagnostics retained.'
+fi
+bootmark services-requested
+bootmark usb-auto-start-begin
+[ ! -x /usr/sbin/q2-usb-auto ] || /usr/sbin/q2-usb-auto start >> /run/log/usb-auto 2>&1
+bootmark usb-auto-start-returned
+echo Q2_INSTALLED_ROOT_READY
+[ ! -x /sbin/q2-sim-ready ] || /sbin/q2-sim-ready &
+dmesg > /run/log/boot
+if grep -qw q2.emulated=1 /proc/cmdline; then
+    while :; do setsid sh -c 'exec sh </dev/ttyS0 >/dev/ttyS0 2>&1'; sleep 1; done
+fi
+while :; do sleep 60; done

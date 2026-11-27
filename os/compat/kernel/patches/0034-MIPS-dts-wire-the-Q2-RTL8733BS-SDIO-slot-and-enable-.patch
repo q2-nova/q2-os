@@ -1,0 +1,150 @@
+From 5576f1fd0e2ee75fe1937b37e48e23f5d781e2d9 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 22:26:12 -0600
+Subject: [PATCH] MIPS: dts: wire the Q2 RTL8733BS SDIO slot and enable
+ cfg80211
+
+Add the X2000 MSC1 controller (0x13460000, interrupt 36, MSC1 CGU
+clock) and enable it on the Q2 as the Wi-Fi slot, following soc_msc.sh:
+non-removable, 4-bit, keep power in suspend. Stock allows 100 MHz; start
+at 50 MHz high speed with 3.3 V signalling until hardware tests.
+
+The stock rtl8733bs.ko (rtk_wlan_bt_power_ctrl, rtk_wlan_power_ctrl)
+drives BT_DIS_N (PD20) high, waits 10 ms, drives WL_DIS_N (PD01) high
+and then rescans MSC1; dropping WL_DIS_N is followed by 100 ms. Both
+enables are active high. Model them as fixed regulators, WL_DIS_N
+supplied by BT_DIS_N with a 10 ms startup delay, and make WL_DIS_N the
+slot supply with a 100 ms minimum off time. The MMC core then raises
+BT_DIS_N before WL_DIS_N and drops them in reverse.
+
+mmc-pwrseq-simple is not used. With a single reset GPIO it takes a
+shared reset control, whose pre-power-on deassert/assert pulses
+WL_DIS_N high for microseconds before every power-up; stock never does.
+A Bluetooth driver can share the BT_DIS_N supply.
+
+Stock uses in-band SDIO card interrupts (MSC1 interrupts follow packets
+on the device), which SDHCI provides by default. The Realtek driver is
+built out of tree; see kernel/rtl8733bs. Enable cfg80211 for it.
+---
+ arch/mips/boot/dts/ingenic/shanling-q2.dts | 52 ++++++++++++++++++++++
+ arch/mips/boot/dts/ingenic/x2000.dtsi      | 10 +++++
+ arch/mips/configs/shanling_q2_defconfig    |  1 +
+ 3 files changed, 63 insertions(+)
+
+diff --git a/arch/mips/boot/dts/ingenic/shanling-q2.dts b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+index e33925f02..6d22932ce 100644
+--- a/arch/mips/boot/dts/ingenic/shanling-q2.dts
++++ b/arch/mips/boot/dts/ingenic/shanling-q2.dts
+@@ -24,6 +24,7 @@ aliases {
+ 		i2c5 = &i2c5;
+ 		i2c6 = &pmic_i2c;
+ 		mmc0 = &msc2;
++		mmc1 = &msc1;
+ 		serial3 = &uart3;
+ 	};
+ 
+@@ -159,6 +160,38 @@ vcc_sd: regulator-sd {
+ 		gpio = <&gpa 12 GPIO_ACTIVE_HIGH>;
+ 		enable-active-high;
+ 	};
++
++	/*
++	 * RTL8733BS Wi-Fi/Bluetooth combo on MSC1. The stock rtl8733bs.ko
++	 * (rtk_wlan_bt_power_ctrl, rtk_wlan_power_ctrl) drives BT_DIS_N (PD20)
++	 * high, waits 10 ms, drives WL_DIS_N (PD01) high, then rescans MSC1;
++	 * after dropping WL_DIS_N it waits 100 ms. Both enables are active
++	 * high. Model them as a supply chain so the MMC core keeps that order:
++	 * enabling the slot supply raises BT_DIS_N first. mmc-pwrseq-simple is
++	 * not used: with one reset GPIO it takes a shared reset control and
++	 * pulses WL_DIS_N high before every power-up, which stock never does.
++	 * A Bluetooth driver can share the BT_DIS_N supply.
++	 */
++	wlan_bt_en: regulator-wlan-bt {
++		compatible = "regulator-fixed";
++		regulator-name = "wlan-bt-en";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		gpio = <&gpd 20 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		startup-delay-us = <10000>;
++	};
++
++	wlan_en: regulator-wlan {
++		compatible = "regulator-fixed";
++		regulator-name = "wlan-en";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		gpio = <&gpd 1 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		vin-supply = <&wlan_bt_en>;
++		off-on-delay-us = <100000>;
++	};
+ };
+ 
+ &uart0 {
+@@ -190,6 +223,10 @@ i2c5_pins: i2c5-pins {
+ 		function = "i2c5";
+ 		groups = "i2c5-data-d";
+ 	};
++	msc1_pins: mmc1-pins {
++		function = "mmc1";
++		groups = "mmc1-1bit", "mmc1-4bit";
++	};
+ 	msc2_pins: mmc2-pins {
+ 		function = "mmc2";
+ 		groups = "mmc2-1bit", "mmc2-4bit";
+@@ -236,6 +273,21 @@ &i2c5 {
+ 	clock-frequency = <400000>;
+ };
+ 
++/* soc_msc.sh: msc1 non-removable, 4-bit SDIO, keep power in suspend. */
++&msc1 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&msc1_pins>;
++	vmmc-supply = <&wlan_en>;
++	bus-width = <4>;
++	non-removable;
++	keep-power-in-suspend;
++	cap-sd-highspeed;
++	no-1-8-v;
++	/* Stock allows 100 MHz; start at high speed until hardware tests. */
++	max-frequency = <50000000>;
++};
++
+ &msc2 {
+ 	status = "okay";
+ 	pinctrl-names = "default";
+diff --git a/arch/mips/boot/dts/ingenic/x2000.dtsi b/arch/mips/boot/dts/ingenic/x2000.dtsi
+index 27436f862..a8b24679e 100644
+--- a/arch/mips/boot/dts/ingenic/x2000.dtsi
++++ b/arch/mips/boot/dts/ingenic/x2000.dtsi
+@@ -323,6 +323,16 @@ i2c5: i2c@10055000 {
+ 		status = "disabled";
+ 	};
+ 
++	msc1: mmc@13460000 {
++		compatible = "ingenic,x2000-sdhci";
++		reg = <0x13460000 0x10000>;
++		interrupt-parent = <&intc>;
++		interrupts = <36>;
++		clocks = <&cgu X2000_CLK_MSC_EXCLK>, <&cgu X2000_CLK_MSC1>;
++		clock-names = "ext", "sdhci";
++		status = "disabled";
++	};
++
+ 	msc2: mmc@13490000 {
+ 		compatible = "ingenic,x2000-sdhci";
+ 		reg = <0x13490000 0x10000>;
+diff --git a/arch/mips/configs/shanling_q2_defconfig b/arch/mips/configs/shanling_q2_defconfig
+index 5b8503d15..05c7f2b1a 100644
+--- a/arch/mips/configs/shanling_q2_defconfig
++++ b/arch/mips/configs/shanling_q2_defconfig
+@@ -23,6 +23,7 @@ CONFIG_NET=y
+ CONFIG_PACKET=y
+ CONFIG_UNIX=y
+ CONFIG_INET=y
++CONFIG_CFG80211=y
+ CONFIG_DEVTMPFS=y
+ CONFIG_DEVTMPFS_MOUNT=y
+ CONFIG_SERIAL_8250=y

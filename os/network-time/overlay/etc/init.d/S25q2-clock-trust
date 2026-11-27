@@ -1,0 +1,15 @@
+#!/bin/sh
+case "$1" in start) ;; *) exit 0;; esac
+[ "$(cat /run/q2/clock-status)" = rtc-or-system ] || exit 0
+# NTP source provenance survives reboot; it is not an epoch/lower bound.
+if [ -f /state/trust/network-ntp-rtc ] && hwclock -r -u >/dev/null 2>&1; then
+    echo network-ntp-rtc > /run/q2/clock-status
+    exit 0
+fi
+# Retain explicit local provisioning as a separate existing management path.
+[ -f /state/trust/clock-epoch ] || exit 0
+epoch=$(cat /state/trust/clock-epoch)
+case "$epoch" in ''|*[!0-9]*) exit 0;; esac
+if hwclock -r -u >/dev/null 2>&1 && [ "$(date +%s)" -ge "$epoch" ]; then
+    echo trusted-rtc > /run/q2/clock-status
+fi

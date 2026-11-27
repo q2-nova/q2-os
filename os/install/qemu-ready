@@ -1,0 +1,25 @@
+#!/bin/sh
+# Bounded serial observation in the keyless local QEMU fixture only.
+set -eu
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+n=0
+while [ "$n" -lt 60 ]; do
+    if [ "$(cat /run/q2/state-status 2>/dev/null)" = ready ]; then
+        pid=$(cat /run/q2nd/player.pid 2>/dev/null || :)
+        case "$pid" in
+            ''|*[!0-9]*) ;;
+            *)
+                if [ "$pid" -gt 1 ] && [ "$(cat /run/q2nd/healthy 2>/dev/null)" = "$pid" ] &&
+                    kill -0 "$pid" 2>/dev/null &&
+                    [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = /usr/bin/q2nd ] &&
+                    grep -q ' first-frame$' /run/q2nd/boot-times 2>/dev/null; then
+                    echo Q2_SIM_PLAYER_READY
+                    exit 0
+                fi
+                ;;
+        esac
+    fi
+    n=$((n + 1))
+    sleep 1
+done
+echo Q2_SIM_PLAYER_TIMEOUT

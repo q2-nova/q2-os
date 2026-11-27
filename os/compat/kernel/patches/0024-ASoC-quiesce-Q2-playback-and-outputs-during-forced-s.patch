@@ -1,0 +1,123 @@
+From ccfb864ac4f71c629655855f4774cee9879e9ac7 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 14:32:53 -0500
+Subject: [PATCH 24/24] ASoC: quiesce Q2 playback and outputs during forced
+ shutdown
+
+An open PCM stream may survive until device_shutdown during forced poweroff or kexec. Reject later starts, stop DMA under the stream lock, cancel polling, wait for idle and reset the channel before dropping the temporary clock reference. Run card DAPM shutdown and force the board mute/mode/boost outputs to the inactive state.
+
+Generated active-playback poweroff tests inspect emulator registers after guest shutdown in normal and fixed-icount modes. This covers the audio prerequisite only; it does not qualify SMP kexec, cache coherency, physical DMA drain or analog shutdown timing.
+---
+ sound/soc/jz4740/shanling-q2.c | 10 ++++++++
+ sound/soc/jz4740/x2000-audio.c | 42 +++++++++++++++++++++++++++++++++-
+ 2 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/jz4740/shanling-q2.c b/sound/soc/jz4740/shanling-q2.c
+index 0c5b1a536..fb2f830f1 100644
+--- a/sound/soc/jz4740/shanling-q2.c
++++ b/sound/soc/jz4740/shanling-q2.c
+@@ -203,6 +203,15 @@ static int q2_audio_probe(struct platform_device *pdev)
+ 	return devm_snd_soc_register_card(dev, &q2->card);
+ }
+ 
++static void q2_audio_shutdown(struct platform_device *pdev)
++{
++	struct snd_soc_card *card = platform_get_drvdata(pdev);
++	struct q2_audio *q2 = snd_soc_card_get_drvdata(card);
++
++	snd_soc_poweroff(&pdev->dev);
++	q2_mute(q2);
++}
++
+ static const struct of_device_id q2_audio_of_match[] = {
+ 	{ .compatible = "shanling,q2-audio" },
+ 	{ }
+@@ -211,6 +220,7 @@ MODULE_DEVICE_TABLE(of, q2_audio_of_match);
+ 
+ static struct platform_driver q2_audio_driver = {
+ 	.probe = q2_audio_probe,
++	.shutdown = q2_audio_shutdown,
+ 	.driver = {
+ 		.name = "shanling-q2-audio",
+ 		.of_match_table = q2_audio_of_match,
+diff --git a/sound/soc/jz4740/x2000-audio.c b/sound/soc/jz4740/x2000-audio.c
+index 63ef38d94..7f04da888 100644
+--- a/sound/soc/jz4740/x2000-audio.c
++++ b/sound/soc/jz4740/x2000-audio.c
+@@ -51,7 +51,7 @@ struct x2000_audio {
+ 	dma_addr_t desc_dma;
+ 	struct hrtimer timer;
+ 	struct snd_pcm_substream *substream;
+-	bool running;
++	bool running, shutting_down;
+ 	unsigned int buffer_bytes, period_bytes, last_pos, period_pos;
+ };
+ 
+@@ -120,6 +120,8 @@ static int x2000_open(struct snd_soc_component *component,
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	int ret;
+ 
++	if (READ_ONCE(audio->shutting_down))
++		return -ESHUTDOWN;
+ 	runtime->hw = x2000_pcm_hw;
+ 	ret = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+ 	if (ret < 0)
+@@ -244,6 +246,8 @@ static int x2000_trigger(struct snd_soc_component *component,
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
+ 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		if (READ_ONCE(audio->shutting_down))
++			return -ESHUTDOWN;
+ 		writel(readl(audio->base + DFCR) | 1, audio->base + DFCR);
+ 		writel(1, audio->base + DCR);
+ 		writel(1, audio->base + FCR);
+@@ -361,6 +365,41 @@ static int x2000_audio_probe(struct platform_device *pdev)
+ 	return devm_snd_soc_register_component(dev, &x2000_component, &x2000_dai, 1);
+ }
+ 
++static void x2000_audio_shutdown(struct platform_device *pdev)
++{
++	struct x2000_audio *audio = platform_get_drvdata(pdev);
++	struct snd_pcm_substream *substream;
++	unsigned long flags;
++	u32 status;
++	int ret;
++
++	/* A forced reboot can leave an open PCM stream. Prevent another START
++	 * and serialize with the trigger/poll path before cancelling its timer.
++	 */
++	WRITE_ONCE(audio->shutting_down, true);
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(audio->clocks), audio->clocks);
++	if (ret) {
++		dev_err(&pdev->dev, "Cannot enable clocks for DMA shutdown: %d\n", ret);
++		return;
++	}
++	substream = READ_ONCE(audio->substream);
++	if (substream) {
++		snd_pcm_stream_lock_irqsave(substream, flags);
++		x2000_stop(audio);
++		snd_pcm_stream_unlock_irqrestore(substream, flags);
++	} else {
++		x2000_stop(audio);
++	}
++	hrtimer_cancel(&audio->timer);
++	ret = readl_poll_timeout(audio->base + DSR, status, !(status & 2), 10, 10000);
++	if (ret)
++		dev_warn(&pdev->dev, "DMA shutdown timed out; resetting channel\n");
++	writel(2, audio->base + DCR);
++	writel(0, audio->base + DFCR);
++	writel(BIT(9), audio->base + BTCLR);
++	clk_bulk_disable_unprepare(ARRAY_SIZE(audio->clocks), audio->clocks);
++}
++
+ static const struct of_device_id x2000_audio_of_match[] = {
+ 	{ .compatible = "ingenic,x2000-audio" },
+ 	{ }
+@@ -369,6 +408,7 @@ MODULE_DEVICE_TABLE(of, x2000_audio_of_match);
+ 
+ static struct platform_driver x2000_audio_driver = {
+ 	.probe = x2000_audio_probe,
++	.shutdown = x2000_audio_shutdown,
+ 	.driver = {
+ 		.name = "x2000-audio",
+ 		.of_match_table = x2000_audio_of_match,

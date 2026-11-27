@@ -1,0 +1,28 @@
+#!/bin/sh
+# Stage a checked development binary for the existing launcher's trial/rollback.
+set -eu
+[ "$#" -eq 2 ] || { echo 'usage: q2-app-update CANDIDATE SHA256' >&2; exit 2; }
+candidate=$1
+expected=$2
+case "$expected" in *[!0-9a-f]*|'') echo 'invalid SHA256' >&2; exit 2 ;; esac
+[ "${#expected}" -eq 64 ] || exit 2
+APP=/state/app
+RUN=/run/q2nd
+[ "$(cat /run/q2/state-status)" = ready ] || { echo 'state unavailable' >&2; exit 1; }
+mkdir -p "$RUN"
+mkdir "$RUN/update-lock" || { echo 'update already active' >&2; exit 1; }
+trap 'rm -f "$APP/player.upload" "$APP/player.checksum-upload"; rmdir "$RUN/update-lock"' EXIT
+actual=$(sha256sum "$candidate"); actual=${actual%% *}
+[ "$actual" = "$expected" ] || { echo 'checksum mismatch' >&2; exit 1; }
+cp "$candidate" "$APP/player.upload"
+chmod 755 "$APP/player.upload"
+actual=$(sha256sum "$APP/player.upload"); actual=${actual%% *}
+[ "$actual" = "$expected" ] || { echo 'staged checksum mismatch' >&2; exit 1; }
+printf '%s  %s\n' "$expected" "$APP/player.next" > "$APP/player.checksum-upload"
+sync
+mv "$APP/player.upload" "$APP/player.next"
+mv "$APP/player.checksum-upload" "$APP/player.next.sha256"
+sync
+: > "$RUN/restart"
+[ ! -s "$RUN/launcher.pid" ] || kill -USR1 "$(cat "$RUN/launcher.pid")"
+echo 'Q2_UPDATE=staged'

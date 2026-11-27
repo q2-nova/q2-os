@@ -1,0 +1,404 @@
+From 0638d9c9f180d26bc43a2683bdf57e08cba342d0 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:29:15 -0500
+Subject: [PATCH 4/5] MIPS: ingenic: add X2000 CCU SMP bring-up
+
+Adapt the Ingenic-community SMP approach by Paul Burton and Zhou Yanjie
+(reference revision 91fe78280ac7dd0dae0f58cb271e821bd39ba97e), retaining
+their copyright notices, with the Q2 vendor CCU reset/mailbox registers.
+The vendor SDK reference is DiamondBond/q2-kernel at
+655f42c032402719881ff2a1b801bd797dc514c1.
+
+Both CPUs boot, execute userspace and receive mailbox interrupts in QEMU.
+CPU hotplug and cache coherency on physical hardware remain unvalidated.
+---
+ arch/mips/generic/Makefile                  |   2 +
+ arch/mips/generic/init.c                    |   2 +
+ arch/mips/generic/smp-ingenic-x2000-entry.S |  42 ++++
+ arch/mips/generic/smp-ingenic-x2000.c       | 239 ++++++++++++++++++++
+ arch/mips/include/asm/smp-ops.h             |  13 ++
+ arch/mips/ingenic/Kconfig                   |  18 ++
+ 6 files changed, 316 insertions(+)
+ create mode 100644 arch/mips/generic/smp-ingenic-x2000-entry.S
+ create mode 100644 arch/mips/generic/smp-ingenic-x2000.c
+
+diff --git a/arch/mips/generic/Makefile b/arch/mips/generic/Makefile
+index ea0e4ad5e..171db7c9c 100644
+--- a/arch/mips/generic/Makefile
++++ b/arch/mips/generic/Makefile
+@@ -12,5 +12,7 @@ obj-$(CONFIG_YAMON_DT_SHIM)		+= yamon-dt.o
+ obj-$(CONFIG_LEGACY_BOARD_SEAD3)	+= board-sead3.o
+ obj-$(CONFIG_LEGACY_BOARD_OCELOT)	+= board-ocelot.o
+ obj-$(CONFIG_MACH_INGENIC)			+= board-ingenic.o
++obj-$(CONFIG_INGENIC_X2000_SMP)		+= smp-ingenic-x2000.o
++obj-$(CONFIG_INGENIC_X2000_SMP)		+= smp-ingenic-x2000-entry.o
+ obj-$(CONFIG_VIRT_BOARD_RANCHU)		+= board-ranchu.o
+ obj-$(CONFIG_MACH_REALTEK_RTL)		+= board-realtek.o
+diff --git a/arch/mips/generic/init.c b/arch/mips/generic/init.c
+index 1d712eac1..7574e96fe 100644
+--- a/arch/mips/generic/init.c
++++ b/arch/mips/generic/init.c
+@@ -115,6 +115,8 @@ void __init device_tree_init(void)
+ 
+ 	if (!register_cps_smp_ops())
+ 		return;
++	if (!register_ingenic_x2000_smp_ops())
++		return;
+ 	if (!register_vsmp_smp_ops())
+ 		return;
+ 
+diff --git a/arch/mips/generic/smp-ingenic-x2000-entry.S b/arch/mips/generic/smp-ingenic-x2000-entry.S
+new file mode 100644
+index 000000000..ffdb846e1
+--- /dev/null
++++ b/arch/mips/generic/smp-ingenic-x2000-entry.S
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Secondary core entry for the Ingenic X2000. The CCU starts a released
++ * core here (through KSEG1, uncached); it sets up CP0, loads the stack and
++ * thread pointers left by x2000_boot_secondary() and enters the kernel.
++ *
++ * Based on the Ingenic XBurst SMP entry by Paul Burton and Zhou Yanjie.
++ * Copyright (c) 2013 Paul Burton <paul.burton@imgtec.com>
++ * Copyright (c) 2021 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ */
++
++#include <asm/addrspace.h>
++#include <asm/asm.h>
++#include <asm/mipsregs.h>
++#include <asm/regdef.h>
++
++	.text
++	.balign	4096
++	.set	noreorder
++LEAF(x2000_secondary_entry)
++	mtc0	zero, CP0_CAUSE
++	li	t0, ST0_CU0
++	mtc0	t0, CP0_STATUS
++
++	/* KSEG0 cacheable, non-coherent */
++	mfc0	t0, CP0_CONFIG
++	li	t1, ~CONF_CM_CMASK
++	and	t0, t0, t1
++	ori	t0, t0, CONF_CM_CACHABLE_NONCOHERENT
++	mtc0	t0, CP0_CONFIG
++	mtc0	zero, CP0_PAGEMASK
++	ehb
++
++	PTR_LA	t0, x2000_secondary_sp
++	lw	sp, 0(t0)
++	PTR_LA	t0, x2000_secondary_gp
++	lw	gp, 0(t0)
++
++	PTR_LA	t0, smp_bootstrap
++	jr	t0
++	 nop
++	END(x2000_secondary_entry)
+diff --git a/arch/mips/generic/smp-ingenic-x2000.c b/arch/mips/generic/smp-ingenic-x2000.c
+new file mode 100644
+index 000000000..e6df4953b
+--- /dev/null
++++ b/arch/mips/generic/smp-ingenic-x2000.c
+@@ -0,0 +1,239 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * SMP support for the Ingenic X2000 (XBurst2).
++ *
++ * The core control unit (CCU) holds the secondary core in reset and gives
++ * it a reset entry address, routes peripheral, OST and mailbox interrupts
++ * to each core through per-core mask bits, and has one mailbox register
++ * per core: a non-zero value raises CP0 IP3 on that core until the core
++ * writes it back to zero.
++ *
++ * Based on the XBurst2 SMP support by Zhou Yanjie and SudoMaker in the
++ * Ingenic-community kernel, and on the behaviour of Ingenic's vendor
++ * kernel for the X2000.
++ * Copyright (c) 2013 Paul Burton <paul.burton@imgtec.com>
++ * Copyright (c) 2021 周琰杰 (Zhou Yanjie) <zhouyanjie@wanyeetech.com>
++ */
++
++#include <linux/cpu.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/irq.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/sched/hotplug.h>
++#include <linux/sched/task_stack.h>
++#include <linux/smp.h>
++#include <linux/spinlock.h>
++
++#include <asm/cpu-info.h>
++#include <asm/mipsregs.h>
++#include <asm/smp-ops.h>
++#include <asm/tlbflush.h>
++
++#define CCU_CSSR		0x020	/* core sleep status */
++#define CCU_CSRR		0x040	/* core software reset */
++#define CCU_PIMR		0x120	/* peripheral interrupt mask, per core */
++#define CCU_MIMR		0x160	/* mailbox interrupt mask, per core */
++#define CCU_OIMR		0x1a0	/* OST interrupt mask, per core */
++#define CCU_RER			0xf00	/* reset entry */
++#define CCU_MBR(cpu)		(0x1000 + 4 * (cpu))
++
++#define X2000_MAILBOX_IRQ	(MIPS_CPU_IRQ_BASE + 3)
++
++void x2000_secondary_entry(void);
++
++/* Stack and thread pointers for the core being started (smp-ingenic-entry.S). */
++unsigned long x2000_secondary_sp;
++unsigned long x2000_secondary_gp;
++
++static void __iomem *ccu;
++static DEFINE_RAW_SPINLOCK(ccu_lock);
++static int __percpu *mbox_dev_id;
++
++static void ccu_update(unsigned int reg, u32 clear, u32 set)
++{
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&ccu_lock, flags);
++	writel((readl(ccu + reg) & ~clear) | set, ccu + reg);
++	raw_spin_unlock_irqrestore(&ccu_lock, flags);
++}
++
++static irqreturn_t x2000_mailbox_irq(int irq, void *dev_id)
++{
++	unsigned int cpu = smp_processor_id();
++	u32 action;
++
++	raw_spin_lock(&ccu_lock);
++	action = readl(ccu + CCU_MBR(cpu));
++	writel(0, ccu + CCU_MBR(cpu));
++	raw_spin_unlock(&ccu_lock);
++
++	if (action & SMP_RESCHEDULE_YOURSELF)
++		scheduler_ipi();
++	if (action & SMP_CALL_FUNCTION)
++		generic_smp_call_function_interrupt();
++
++	return IRQ_HANDLED;
++}
++
++static void x2000_send_ipi_single(int cpu, unsigned int action)
++{
++	ccu_update(CCU_MBR(cpu), 0, action);
++}
++
++static void x2000_send_ipi_mask(const struct cpumask *mask, unsigned int action)
++{
++	unsigned int cpu;
++
++	for_each_cpu(cpu, mask)
++		x2000_send_ipi_single(cpu, action);
++}
++
++static void __init x2000_smp_setup(void)
++{
++	struct device_node *np;
++	int ncpus = 0;
++
++	for_each_of_cpu_node(np) {
++		__cpu_number_map[ncpus] = ncpus;
++		__cpu_logical_map[ncpus] = ncpus;
++		set_cpu_possible(ncpus, true);
++		set_cpu_present(ncpus, true);
++		ncpus++;
++	}
++
++	/* Only this core takes mailbox interrupts until the others are up. */
++	writel(BIT(0), ccu + CCU_MIMR);
++	for (int cpu = 0; cpu < ncpus; cpu++)
++		writel(0, ccu + CCU_MBR(cpu));
++	writel(KSEG1ADDR((unsigned long)x2000_secondary_entry), ccu + CCU_RER);
++}
++
++static void __init x2000_prepare_cpus(unsigned int max_cpus)
++{
++	u32 cores = GENMASK(num_possible_cpus() - 1, 0);
++	int err;
++
++	mbox_dev_id = alloc_percpu(int);
++	if (!mbox_dev_id)
++		panic("x2000-smp: cannot allocate mailbox data");
++	err = irq_set_percpu_devid(X2000_MAILBOX_IRQ);
++	if (err)
++		panic("x2000-smp: cannot configure mailbox interrupt: %d", err);
++	irq_set_handler(X2000_MAILBOX_IRQ, handle_percpu_devid_irq);
++	err = request_percpu_irq(X2000_MAILBOX_IRQ, x2000_mailbox_irq,
++				 "x2000-mailbox", mbox_dev_id);
++	if (err) {
++		panic("x2000-smp: mailbox interrupt: %d", err);
++	}
++	enable_percpu_irq(X2000_MAILBOX_IRQ, IRQ_TYPE_NONE);
++
++	/* Peripheral and OST interrupts reach every core. */
++	ccu_update(CCU_PIMR, 0, cores);
++	ccu_update(CCU_OIMR, 0, cores);
++}
++
++static int x2000_boot_secondary(int cpu, struct task_struct *idle)
++{
++	ccu_update(CCU_CSRR, 0, BIT(cpu));
++
++	x2000_secondary_sp = __KSTK_TOS(idle);
++	x2000_secondary_gp = (unsigned long)task_thread_info(idle);
++	/* The new core reads these uncached from the entry code. */
++	wmb();
++	__flush_cache_all();
++
++	ccu_update(CCU_CSRR, BIT(cpu), 0);
++
++	return 0;
++}
++
++static void x2000_init_secondary(void)
++{
++}
++
++static void x2000_smp_finish(void)
++{
++	unsigned int cpu = smp_processor_id();
++
++	ccu_update(CCU_MIMR, 0, BIT(cpu));
++	enable_percpu_irq(X2000_MAILBOX_IRQ, IRQ_TYPE_NONE);
++	change_c0_status(ST0_IM, STATUSF_IP2 | STATUSF_IP3 | STATUSF_IP4);
++}
++
++#ifdef CONFIG_HOTPLUG_CPU
++static int x2000_cpu_disable(void)
++{
++	unsigned int cpu = smp_processor_id();
++
++	set_cpu_online(cpu, false);
++	calculate_cpu_foreign_map();
++	irq_migrate_all_off_this_cpu();
++	clear_tasks_mm_cpumask(cpu);
++
++	return 0;
++}
++
++static void x2000_cpu_die(unsigned int cpu)
++{
++	/* Wait for the core to reach WAIT in play_dead(), then reset it. */
++	while (!(readl(ccu + CCU_CSSR) & BIT(cpu)))
++		cpu_relax();
++	ccu_update(CCU_CSRR, 0, BIT(cpu));
++}
++
++void __noreturn play_dead(void)
++{
++	unsigned int cpu = smp_processor_id();
++
++	ccu_update(CCU_MIMR, BIT(cpu), 0);
++	idle_task_exit();
++	local_irq_disable();
++	local_flush_tlb_all();
++	__flush_cache_all();
++
++	for (;;)
++		__asm__ __volatile__(
++		"	.set	push		\n"
++		"	.set	mips32r2	\n"
++		"	sync			\n"
++		"	wait			\n"
++		"	.set	pop		\n");
++}
++#endif
++
++static const struct plat_smp_ops x2000_smp_ops = {
++	.send_ipi_single	= x2000_send_ipi_single,
++	.send_ipi_mask		= x2000_send_ipi_mask,
++	.smp_setup		= x2000_smp_setup,
++	.prepare_cpus		= x2000_prepare_cpus,
++	.boot_secondary		= x2000_boot_secondary,
++	.init_secondary		= x2000_init_secondary,
++	.smp_finish		= x2000_smp_finish,
++#ifdef CONFIG_HOTPLUG_CPU
++	.cpu_disable		= x2000_cpu_disable,
++	.cpu_die		= x2000_cpu_die,
++#endif
++};
++
++int __init register_ingenic_x2000_smp_ops(void)
++{
++	struct device_node *np;
++
++	if ((read_c0_prid() & PRID_IMP_MASK) != PRID_IMP_XBURST2)
++		return -ENODEV;
++
++	np = of_find_compatible_node(NULL, NULL, "ingenic,x2000-ccu");
++	if (!np)
++		return -ENODEV;
++	ccu = of_iomap(np, 0);
++	of_node_put(np);
++	if (!ccu)
++		return -ENOMEM;
++
++	register_smp_ops(&x2000_smp_ops);
++
++	return 0;
++}
+diff --git a/arch/mips/include/asm/smp-ops.h b/arch/mips/include/asm/smp-ops.h
+index 1617b2077..03d3b2a1e 100644
+--- a/arch/mips/include/asm/smp-ops.h
++++ b/arch/mips/include/asm/smp-ops.h
+@@ -104,4 +104,17 @@ static inline int register_cps_smp_ops(void)
+ }
+ #endif
+ 
++#ifdef CONFIG_INGENIC_X2000_SMP
++
++extern int register_ingenic_x2000_smp_ops(void);
++
++#else
++
++static inline int register_ingenic_x2000_smp_ops(void)
++{
++	return -ENODEV;
++}
++
++#endif
++
+ #endif /* __ASM_SMP_OPS_H */
+diff --git a/arch/mips/ingenic/Kconfig b/arch/mips/ingenic/Kconfig
+index f595b339a..ca1d087fe 100644
+--- a/arch/mips/ingenic/Kconfig
++++ b/arch/mips/ingenic/Kconfig
+@@ -9,6 +9,7 @@ config MACH_INGENIC_GENERIC
+ 	select MACH_JZ4780
+ 	select MACH_X1000
+ 	select MACH_X1830
++	select MACH_X2000
+ 
+ choice
+ 	prompt "Machine type"
+@@ -43,6 +44,10 @@ config X1830_CU1830_NEO
+ 	bool "YSH & ATIL CU1830 Module with Neo backplane"
+ 	select MACH_X1830
+ 
++config X2000_SHANLING_Q2
++	bool "Shanling Q2 portable music player"
++	select MACH_X2000
++
+ endchoice
+ 
+ config MACH_JZ4725B
+@@ -76,3 +81,16 @@ config MACH_X1830
+ 	select MIPS_CPU_SCACHE
+ 	select SYS_HAS_CPU_MIPS32_R2
+ 	select SYS_SUPPORTS_HIGHMEM
++
++config MACH_X2000
++	bool
++	select GENERIC_CLOCKEVENTS_BROADCAST if SMP
++	select SYS_HAS_CPU_MIPS32_R5
++	select SYS_SUPPORTS_HIGHMEM
++	select SYS_SUPPORTS_SMP
++	select MIPS_O32_FP64_SUPPORT
++	select WEAK_ORDERING
++	select WEAK_REORDERING_BEYOND_LLSC
++
++config INGENIC_X2000_SMP
++	def_bool SMP && MACH_X2000 && !MIPS_CPS

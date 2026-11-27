@@ -1,0 +1,193 @@
+From: Q2 development <noreply@localhost>
+Subject: [PATCH] Use cold SDIO suspend unless a wake mode is enabled
+
+Preserve the installed bounded IPS wait and transactional failure semantics.
+Let ordinary MMC suspend cycle power, retain only real wake modes, preserve
+inactive interfaces and propagate normal resume failures.
+
+diff --git a/include/drv_types.h b/include/drv_types.h
+index 2be895a..689edfe 100755
+--- a/include/drv_types.h
++++ b/include/drv_types.h
+@@ -1495,6 +1495,10 @@ struct dvobj_priv {
+ 	u8	Queue2Pipe[HW_QUEUE_ENTRY];/* for out pipe mapping */
+ 
+ 	u8	irq_alloc;
++#ifdef CONFIG_SDIO_HCI
++	/* A quiescent interface must not be opened by system resume. */
++	bool sdio_pm_inactive;
++#endif
+ 	ATOMIC_T continual_io_error;
+ 
+ 	ATOMIC_T disable_func;
+diff --git a/os_dep/linux/os_intfs.c b/os_dep/linux/os_intfs.c
+index a6608a8..2dfb9f3 100644
+--- a/os_dep/linux/os_intfs.c
++++ b/os_dep/linux/os_intfs.c
+@@ -5835,13 +5835,15 @@ int rtw_resume_common(_adapter *padapter)
+ 			rtw_resume_process_wow(padapter);
+ 		else
+ #endif
+-			rtw_resume_process_normal(padapter);
++			if (rtw_resume_process_normal(padapter) != _SUCCESS)
++				ret = -EIO;
+ 
+ 	} else if (rtw_mi_check_status(padapter, MI_AP_MODE)) {
+ #ifdef CONFIG_AP_WOWLAN
+ 		rtw_resume_process_ap_wow(padapter);
+ #else
+-		rtw_resume_process_normal(padapter);
++		if (rtw_resume_process_normal(padapter) != _SUCCESS)
++			ret = -EIO;
+ #endif /* CONFIG_AP_WOWLAN */
+ 	}
+ 
+@@ -5849,7 +5851,8 @@ int rtw_resume_common(_adapter *padapter)
+ 	rtw_hal_set_hwreg(padapter, HW_VAR_WAKE_ON_BT_GPIO_SWITCH, (u8 *)(&disable));
+ #endif
+ 
+-	pwrpriv->bInSuspend = _FALSE;
++	if (!ret)
++		pwrpriv->bInSuspend = _FALSE;
+ 	pwrpriv->wowlan_in_resume = _FALSE;
+ 
+ 	RTW_PRINT("%s:%d in %d ms\n", __FUNCTION__ , ret,
+diff --git a/os_dep/linux/sdio_intf.c b/os_dep/linux/sdio_intf.c
+index 522fbdb..8e3a3a5 100755
+--- a/os_dep/linux/sdio_intf.c
++++ b/os_dep/linux/sdio_intf.c
+@@ -1289,55 +1289,72 @@ static int rtw_sdio_suspend(struct device *dev)
+ #endif
+ 
+ 	if (dev == NULL)
+-		return ret;
++		return -EINVAL;
+ 
+ 	func = dev_to_sdio_func(dev);
+ 	psdpriv = sdio_get_drvdata(func);
+ 	if (psdpriv == NULL)
+-		return ret;
++		return -ENODEV;
+ 
+ 	pwrpriv = dvobj_to_pwrctl(psdpriv);
+ 	padapter = dvobj_get_primary_adapter(psdpriv);
+ 	pdbgpriv = &psdpriv->drv_dbg;
+-	if (rtw_is_drv_stopped(padapter)) {
+-		RTW_INFO("%s bDriverStopped == _TRUE\n", __func__);
+-		return ret;
+-	}
++	if (padapter == NULL)
++		return -ENODEV;
+ 
+-	if (pwrpriv->bInSuspend == _TRUE) {
++	if (pwrpriv->bInSuspend == _TRUE || psdpriv->sdio_pm_inactive) {
+ 		RTW_INFO("%s bInSuspend = %d\n", __func__, pwrpriv->bInSuspend);
+ 		pdbgpriv->dbg_suspend_error_cnt++;
+-		return ret;
++		return -EBUSY;
++	}
++	if (!padapter->bup || rtw_is_drv_stopped(padapter)) {
++		/* No firmware to retain and no netdev to reopen. An outstanding
++		 * IRQ must never outlive the card's power supply.
++		 */
++		if (psdpriv->irq_alloc)
++			return -EBUSY;
++		psdpriv->sdio_pm_inactive = true;
++		return 0;
+ 	}
+ 
+-	/* Validate retention before quiescing: PM will not resume a device
+-	 * whose suspend callback failed. Never strand the radio on refusal. */
++	ret = rtw_suspend_common(padapter);
++	if (ret)
++		goto rollback;
++	if (!pwrpriv->wowlan_mode && !pwrpriv->wowlan_ap_mode) {
++		if (!psdpriv->irq_alloc)
++			return 0;
++		ret = -EBUSY;
++		goto rollback;
++	}
++	/* Only an actual wake mode requires retained SDIO power. Ordinary
++	 * suspend already unloads firmware; MMC may cold-initialize the card.
++	 */
+ #ifdef CONFIG_RTW_SDIO_PM_KEEP_POWER
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 34))
+-	/* Android 4.0 don't support WIFI close power */
+-	/* or power down or clock will close after wifi resume, */
+-	/* this is sprd's bug in Android 4.0, but sprd don't */
+-	/* want to fix it. */
+-	/* we have test power under 8723as, power consumption is ok */
+ 	pm_flag = sdio_get_host_pm_caps(func);
+ 	RTW_INFO("cmd: %s: suspend: PM flag = 0x%x\n", sdio_func_id(func), pm_flag);
+ 	if (!(pm_flag & MMC_PM_KEEP_POWER)) {
+ 		RTW_INFO("%s: cannot remain alive while host is suspended\n", sdio_func_id(func));
+ 		if (pdbgpriv)
+ 			pdbgpriv->dbg_suspend_error_cnt++;
+-		return -ENOSYS;
++		ret = -ENOSYS;
+ 	} else {
+ 		RTW_INFO("cmd: suspend with MMC_PM_KEEP_POWER\n");
+ 		ret = sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
+-		if (ret) {
+-			pdbgpriv->dbg_suspend_error_cnt++;
+-			return ret;
+-		}
+ 	}
++#else
++	ret = -EOPNOTSUPP;
+ #endif
+-#endif
+-
+-	return rtw_suspend_common(padapter);
++#else
++	ret = -EOPNOTSUPP;
++#endif
++	if (!ret)
++		return 0;
++rollback:
++	pdbgpriv->dbg_suspend_error_cnt++;
++	if (pwrpriv->bInSuspend && rtw_resume_common(padapter))
++		RTW_ERR("%s: failed to unwind suspend\n", __func__);
++	return ret;
+ }
+ int rtw_resume_process(_adapter *padapter)
+ {
+@@ -1356,17 +1373,32 @@ int rtw_resume_process(_adapter *padapter)
+ 
+ static int rtw_sdio_resume(struct device *dev)
+ {
+-	struct sdio_func *func = dev_to_sdio_func(dev);
+-	struct dvobj_priv *psdpriv = sdio_get_drvdata(func);
+-	struct pwrctrl_priv *pwrpriv = dvobj_to_pwrctl(psdpriv);
+-	_adapter *padapter = dvobj_get_primary_adapter(psdpriv);
+-	struct mlme_ext_priv	*pmlmeext = &padapter->mlmeextpriv;
++	struct sdio_func *func;
++	struct dvobj_priv *psdpriv;
++	struct pwrctrl_priv *pwrpriv;
++	_adapter *padapter;
++	struct mlme_ext_priv *pmlmeext;
+ 	int ret = 0;
+-	struct debug_priv *pdbgpriv = &psdpriv->drv_dbg;
++	struct debug_priv *pdbgpriv;
++	if (!dev)
++		return -EINVAL;
++	func = dev_to_sdio_func(dev);
++	psdpriv = sdio_get_drvdata(func);
++	if (!psdpriv || !(padapter = dvobj_get_primary_adapter(psdpriv)))
++		return -ENODEV;
++	pwrpriv = dvobj_to_pwrctl(psdpriv);
++	pmlmeext = &padapter->mlmeextpriv;
++	pdbgpriv = &psdpriv->drv_dbg;
+ 
+ 	RTW_INFO("==> %s (%s:%d)\n", __FUNCTION__, current->comm, current->pid);
+ 
+ 	pdbgpriv->dbg_resume_cnt++;
++	if (psdpriv->sdio_pm_inactive) {
++		if (sdio_init(psdpriv) != _SUCCESS)
++			return -EIO;
++		psdpriv->sdio_pm_inactive = false;
++		return 0;
++	}
+ 
+ #ifdef CONFIG_PLATFORM_INTEL_BYT
+ 	if (0)

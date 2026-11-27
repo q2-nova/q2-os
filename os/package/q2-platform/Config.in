@@ -1,0 +1,2 @@
+config BR2_PACKAGE_Q2_PLATFORM
+	bool "Q2 standard KMS display bridge"

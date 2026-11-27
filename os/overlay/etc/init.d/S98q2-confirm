@@ -1,0 +1,8 @@
+#!/bin/sh
+case "$1" in start) ;; *) exit 0;; esac
+grep -q 'q2.bundle=' /proc/cmdline || exit 0
+(
+    n=0
+    while [ ! -s /run/q2nd/healthy ] && [ "$n" -lt 30 ]; do sleep 1; n=$((n+1)); done
+    q2-os-update confirm
+) > /run/q2nd/bundle-confirm.log 2>&1 &

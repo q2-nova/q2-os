@@ -1,0 +1,42 @@
+From: Q2 Navidrome maintainers
+Subject: [PATCH] ash: acknowledge read interruption before checking pending traps
+
+BusyBox 1.38 can retain bb_got_signal after a trap has handled the signal.
+The read builtin then repeatedly receives EINTR with no pending ash trap.
+Consume the notification on the returned EINTR path, before testing
+pending_sig, with a compiler barrier between the two accesses. A new
+signal after the test remains visible to the next poll. Other users of
+bb_got_signal, including line editing, retain their existing semantics.
+
+Reported upstream: https://github.com/vda-linux/busybox_mirror/issues/16
+Downstream report: https://github.com/openwrt/openwrt/issues/23745
+
+--- a/shell/ash.c
++++ b/shell/ash.c
+@@ -14652,16 +14652,26 @@
+ 	 * to jump out of it.
+ 	 */
+  again:
+ 	INTOFF;
+ 	r = shell_builtin_read(&params);
+ 	INTON;
+ 
+ 	if ((uintptr_t)r == 1 && errno == EINTR) {
++#if ENABLE_FEATURE_EDITING
++		/* Consume the notification which interrupted this read before
++		 * deciding whether an ash trap is pending. A handled signal can
++		 * leave this flag set after dotrap() cleared pending_sig.
++		 * Do not clear it after the pending_sig test: a new signal there
++		 * must remain visible to the next read/poll.
++		 */
++		bb_got_signal = 0;
++		barrier();
++#endif
+ 		/* To get SIGCHLD: sleep 1 & read x; echo $x
+ 		 * Correct behavior is to not exit "read"
+ 		 */
+ 		if (pending_sig == 0)
+ 			goto again;
+ 	}
+ 
+ 	if ((uintptr_t)r == 2) /* -t SEC timeout? */

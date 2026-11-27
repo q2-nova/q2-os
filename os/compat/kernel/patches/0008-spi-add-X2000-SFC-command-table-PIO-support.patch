@@ -1,0 +1,317 @@
+From 0f8e5b9e584056b8502281a2863b62d9a5655524 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 11:23:00 -0500
+Subject: [PATCH 08/10] spi: add X2000 SFC command-table PIO support
+
+Implement spi-mem operations using one command descriptor and interrupt-
+driven FIFO transfers, including short/unaligned buffers and timeout cleanup.
+Support single-bit command/address and single/quad data at up to 25 MHz.
+DMA, high-speed sample tuning and suspend remain follow-up work.
+
+Register/FIFO evidence: stock Q2 V1.32 sfc_sync_cdt at 0x8081cad4,
+ingenic_sfc_pio_irq_callback at 0x8081c1b4, and sfc_res_init at 0x8081ceb4.
+Reference: Ingenic's ingenic_sfc_v2 driver by Xiaoyang Fu, Copyright 2015
+Ingenic, in DiamondBond/q2-kernel revision
+655f42c032402719881ff2a1b801bd797dc514c1.
+
+The CGU clock is divided by four. Use conservative setup/hold delays and
+leave sample-delay tuning disabled at the initial low clock rate. Only
+timeout recovery drains the IRQ handler; doing synchronize_irq after every
+completed operation imposes an RCU grace period on every NAND command.
+
+Tested with the Q2 emulator: NAND detection, erase/program/readback, and
+booting a generated squashfs root without an embedded initramfs. This is
+not physical hardware validation; DT binding schema is still pending.
+---
+ drivers/spi/Kconfig           |   8 ++
+ drivers/spi/Makefile          |   1 +
+ drivers/spi/spi-ingenic-sfc.c | 249 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 258 insertions(+)
+ create mode 100644 drivers/spi/spi-ingenic-sfc.c
+
+diff --git a/drivers/spi/Kconfig b/drivers/spi/Kconfig
+index a0f37e2df..06f45cc58 100644
+--- a/drivers/spi/Kconfig
++++ b/drivers/spi/Kconfig
+@@ -522,6 +522,14 @@ config SPI_INGENIC
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called spi-ingenic.
+ 
++config SPI_INGENIC_SFC
++	tristate "Ingenic X2000 serial flash controller"
++	depends on MACH_INGENIC_SOC || COMPILE_TEST
++	depends on OF && COMMON_CLK
++	select SPI_MEM
++	help
++	  Interrupt-driven PIO support for SPI memories on the X2000 SFC.
++
+ config SPI_INTEL
+ 	tristate
+ 
+diff --git a/drivers/spi/Makefile b/drivers/spi/Makefile
+index a18814fbd..7111c5e41 100644
+--- a/drivers/spi/Makefile
++++ b/drivers/spi/Makefile
+@@ -73,6 +73,7 @@ obj-$(CONFIG_SPI_HISI_KUNPENG)		+= spi-hisi-kunpeng.o
+ obj-$(CONFIG_SPI_HISI_SFC_V3XX)		+= spi-hisi-sfc-v3xx.o
+ obj-$(CONFIG_SPI_IMG_SPFI)		+= spi-img-spfi.o
+ obj-$(CONFIG_SPI_IMX)			+= spi-imx.o
++obj-$(CONFIG_SPI_INGENIC_SFC)		+= spi-ingenic-sfc.o
+ obj-$(CONFIG_SPI_INGENIC)		+= spi-ingenic.o
+ obj-$(CONFIG_SPI_INTEL)			+= spi-intel.o
+ obj-$(CONFIG_SPI_INTEL_PCI)		+= spi-intel-pci.o
+diff --git a/drivers/spi/spi-ingenic-sfc.c b/drivers/spi/spi-ingenic-sfc.c
+new file mode 100644
+index 000000000..20f71e1f5
+--- /dev/null
++++ b/drivers/spi/spi-ingenic-sfc.c
+@@ -0,0 +1,249 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Ingenic X2000 serial flash controller, command descriptor table mode.
++ *
++ * Register and FIFO protocol from the Q2 vendor kernel and Ingenic's
++ * ingenic_sfc_v2 driver (Copyright 2015 Ingenic, Xiaoyang Fu).
++ * This spi-mem implementation uses interrupt-driven PIO and one CDT entry.
++ */
++#include <linux/clk.h>
++#include <linux/completion.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/spi/spi-mem.h>
++
++#define SFC_GLB		0x0000
++#define SFC_DEV_CONF	0x0004
++#define SFC_TRAN_LEN	0x002c
++#define SFC_TRIG	0x0064
++#define SFC_SR		0x0068
++#define SFC_SCR		0x006c
++#define SFC_INTC	0x0070
++#define SFC_CGE		0x0078
++#define SFC_CMD_IDX	0x007c
++#define SFC_COL_ADDR	0x0080
++#define SFC_GLB1	0x0094
++#define SFC_CDT		0x0800
++#define SFC_FIFO	0x1000
++
++#define TRIG_START	BIT(0)
++#define TRIG_STOP	BIT(1)
++#define TRIG_FLUSH	BIT(2)
++#define SR_ERRORS	GENMASK(1, 0)
++#define SR_RREQ		BIT(2)
++#define SR_TREQ		BIT(3)
++#define SR_END		BIT(4)
++#define SR_ALL		GENMASK(4, 0)
++#define FIFO_WORDS	32
++
++struct ingenic_sfc {
++	void __iomem *base;
++	struct clk *clk;
++	struct completion done;
++	const struct spi_mem_op *op;
++	unsigned int pos;
++	int irq;
++	int error;
++};
++
++static irqreturn_t ingenic_sfc_irq(int irq, void *data)
++{
++	struct ingenic_sfc *sfc = data;
++	const struct spi_mem_op *op = sfc->op;
++	u32 status = readl(sfc->base + SFC_SR) &
++		     ~readl(sfc->base + SFC_INTC) & SR_ALL;
++	unsigned int words;
++
++	if (!status)
++		return IRQ_NONE;
++	writel(status, sfc->base + SFC_SCR);
++	if (status & SR_ERRORS) {
++		sfc->error = -EIO;
++		goto done;
++	}
++	if (status & (SR_RREQ | SR_TREQ)) {
++		if (!op || sfc->pos >= op->data.nbytes) {
++			sfc->error = -EIO;
++			goto done;
++		}
++		for (words = 0; words < FIFO_WORDS && sfc->pos < op->data.nbytes;
++		     words++) {
++			unsigned int n = min(4U, op->data.nbytes - sfc->pos);
++			u32 value = 0;
++			unsigned int i;
++
++			if (op->data.dir == SPI_MEM_DATA_IN) {
++				u8 *buf = op->data.buf.in;
++
++				value = readl(sfc->base + SFC_FIFO);
++				for (i = 0; i < n; i++)
++					buf[sfc->pos + i] = value >> (8 * i);
++			} else {
++				const u8 *buf = op->data.buf.out;
++
++				for (i = 0; i < n; i++)
++					value |= (u32)buf[sfc->pos + i] << (8 * i);
++				writel(value, sfc->base + SFC_FIFO);
++			}
++			sfc->pos += n;
++		}
++	}
++	if (!(status & SR_END))
++		return IRQ_HANDLED;
++	if (op && sfc->pos != op->data.nbytes)
++		sfc->error = -EIO;
++ done:
++	writel(SR_ALL, sfc->base + SFC_INTC);
++	complete(&sfc->done);
++	return IRQ_HANDLED;
++}
++
++static bool ingenic_sfc_supports_op(struct spi_mem *mem,
++				    const struct spi_mem_op *op)
++{
++	/* Mode 0, SDR, single-bit command/address, single or quad data. */
++	if (op->cmd.nbytes != 1 || op->cmd.buswidth != 1 ||
++	    op->addr.nbytes > 4 || (op->addr.nbytes && op->addr.buswidth != 1) ||
++	    (op->dummy.nbytes && op->dummy.buswidth != 1) ||
++	    op->dummy.nbytes > 7 ||
++	    (op->data.nbytes && op->data.buswidth != 1 && op->data.buswidth != 4))
++		return false;
++
++	return spi_mem_default_supports_op(mem, op);
++}
++
++static int ingenic_sfc_adjust_op_size(struct spi_mem *mem, struct spi_mem_op *op)
++{
++	op->data.nbytes = min(op->data.nbytes, 4096U);
++	return 0;
++}
++
++static int ingenic_sfc_exec_op(struct spi_mem *mem, const struct spi_mem_op *op)
++{
++	struct ingenic_sfc *sfc = spi_controller_get_devdata(mem->spi->controller);
++	u32 conf = BIT(24) | op->cmd.opcode | (op->addr.nbytes << 26) |
++		   (op->dummy.nbytes * 8 << 17);
++	u32 index = 0, enabled = SR_END | SR_ERRORS;
++	unsigned long rate;
++	int ret;
++
++	/* The controller divides its CGU clock by four (vendor timing code). */
++	ret = clk_set_rate(sfc->clk, (unsigned long)op->max_freq * 4);
++	if (ret)
++		return ret;
++	rate = clk_get_rate(sfc->clk);
++	if (!rate || rate > (unsigned long)op->max_freq * 4)
++		return -EINVAL;
++
++	writel(TRIG_STOP, sfc->base + SFC_TRIG);
++	writel(TRIG_FLUSH, sfc->base + SFC_TRIG);
++	writel(SR_ALL, sfc->base + SFC_SCR);
++	/* CDT enabled, PIO, 32-word FIFO threshold, no DMA descriptors. */
++	writel(BIT(14) | (FIFO_WORDS << 7), sfc->base + SFC_GLB);
++	/* Idle CS/HOLD/WP high; maximum setup/hold/CS-high delays. */
++	writel((3 << 11) | (3 << 9) | (15 << 5) | 7, sfc->base + SFC_DEV_CONF);
++	writel(0, sfc->base + SFC_GLB1);
++	writel(op->addr.val, sfc->base + SFC_COL_ADDR);
++	writel(op->data.nbytes, sfc->base + SFC_TRAN_LEN);
++	if (op->data.nbytes) {
++		conf |= BIT(16);
++		index |= BIT(31);
++		if (op->data.dir == SPI_MEM_DATA_OUT) {
++			index |= BIT(30);
++			enabled |= SR_TREQ;
++		} else {
++			enabled |= SR_RREQ;
++		}
++	}
++	/* Address source COL, no link; mode 5 is single command/quad data. */
++	writel(op->data.nbytes && op->data.buswidth == 4 ? 5 << 4 : 0,
++	       sfc->base + SFC_CDT);
++	writel(conf, sfc->base + SFC_CDT + 4);
++	writel(0, sfc->base + SFC_CDT + 8);
++	writel(0, sfc->base + SFC_CDT + 12);
++	writel(index, sfc->base + SFC_CMD_IDX);
++
++	sfc->pos = 0;
++	sfc->error = 0;
++	sfc->op = op;
++	reinit_completion(&sfc->done);
++	writel(SR_ALL & ~enabled, sfc->base + SFC_INTC);
++	writel(TRIG_START, sfc->base + SFC_TRIG);
++	ret = wait_for_completion_timeout(&sfc->done, msecs_to_jiffies(1000)) ?
++	      0 : -ETIMEDOUT;
++	writel(SR_ALL, sfc->base + SFC_INTC);
++	/* Completion is the handler's last access to transfer state. Only a
++	 * timeout needs to drain a handler that might still be using op.
++	 */
++	if (ret)
++		synchronize_irq(sfc->irq);
++	writel(TRIG_STOP, sfc->base + SFC_TRIG);
++	writel(TRIG_FLUSH, sfc->base + SFC_TRIG);
++	writel(SR_ALL, sfc->base + SFC_SCR);
++	sfc->op = NULL;
++	return ret ?: sfc->error;
++}
++
++static const struct spi_controller_mem_ops ingenic_sfc_mem_ops = {
++	.supports_op = ingenic_sfc_supports_op,
++	.adjust_op_size = ingenic_sfc_adjust_op_size,
++	.exec_op = ingenic_sfc_exec_op,
++};
++
++static int ingenic_sfc_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct spi_controller *ctlr;
++	struct ingenic_sfc *sfc;
++	int ret;
++
++	ctlr = devm_spi_alloc_host(dev, sizeof(*sfc));
++	if (!ctlr)
++		return -ENOMEM;
++	sfc = spi_controller_get_devdata(ctlr);
++	sfc->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(sfc->base))
++		return PTR_ERR(sfc->base);
++	sfc->clk = devm_clk_get_enabled(dev, NULL);
++	if (IS_ERR(sfc->clk))
++		return dev_err_probe(dev, PTR_ERR(sfc->clk), "SFC clock\n");
++	sfc->irq = platform_get_irq(pdev, 0);
++	if (sfc->irq < 0)
++		return sfc->irq;
++	init_completion(&sfc->done);
++	writel(SR_ALL, sfc->base + SFC_INTC);
++	writel(TRIG_STOP, sfc->base + SFC_TRIG);
++	writel(SR_ALL, sfc->base + SFC_SCR);
++	writel(0, sfc->base + SFC_CGE);
++	ret = devm_request_irq(dev, sfc->irq, ingenic_sfc_irq, 0,
++			       dev_name(dev), sfc);
++	if (ret)
++		return ret;
++	ctlr->mem_ops = &ingenic_sfc_mem_ops;
++	ctlr->mode_bits = SPI_RX_QUAD | SPI_TX_QUAD;
++	ctlr->num_chipselect = 1;
++	/* Initial bring-up limit; high-speed sampling needs board validation. */
++	ctlr->max_speed_hz = 25000000;
++	ctlr->dev.of_node = dev->of_node;
++	return devm_spi_register_controller(dev, ctlr);
++}
++
++static const struct of_device_id ingenic_sfc_of_match[] = {
++	{ .compatible = "ingenic,x2000-sfc" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, ingenic_sfc_of_match);
++
++static struct platform_driver ingenic_sfc_driver = {
++	.probe = ingenic_sfc_probe,
++	.driver = {
++		.name = "ingenic-sfc",
++		.of_match_table = ingenic_sfc_of_match,
++	},
++};
++module_platform_driver(ingenic_sfc_driver);
++
++MODULE_DESCRIPTION("Ingenic X2000 serial flash controller");
++MODULE_LICENSE("GPL");

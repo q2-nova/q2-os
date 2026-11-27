@@ -1,0 +1,48 @@
+From eef745843c6281d4c52a76c1bb130f9d6a630643 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 17:08:29 -0500
+Subject: [PATCH 25/25] ASoC: account for X2000 FIFO occupancy when reporting
+ playback
+
+DMA DBA includes prefetched FIFO words. Subtract FSR occupancy from the reported serial-consumption position so period-aligned drain retains its buffered tail. Explicitly flush the FIFO on prepare. Register fields follow Ingenic as-v2 and the stock 384-word allocation. Emulator regression failed before the correction and passes afterward; physical FIFO packing and drain remain unqualified.
+---
+ sound/soc/jz4740/x2000-audio.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/jz4740/x2000-audio.c b/sound/soc/jz4740/x2000-audio.c
+index 7f04da888..0173bcf82 100644
+--- a/sound/soc/jz4740/x2000-audio.c
++++ b/sound/soc/jz4740/x2000-audio.c
+@@ -27,6 +27,7 @@
+ #define FAS		0x1000
+ #define FCR		0x1004
+ #define FFR		0x1008
++#define FSR		0x100c
+ #define DFCR		0x2000
+ #define BTSET		0x4000
+ #define BTCLR		0x4004
+@@ -60,7 +61,15 @@ static unsigned int x2000_position(struct x2000_audio *audio)
+ 	u32 pos = readl(audio->base + DBA) -
+ 		  audio->substream->runtime->dma_addr;
+ 
+-	return pos < audio->buffer_bytes ? pos : 0;
++	u32 queued = ((readl(audio->base + FSR) >> 16) & 0x1fff) * 4;
++
++	/* DBA includes prefetched FIFO words. Report the serial-consumption
++	 * position so period-aligned drains do not discard the buffered tail.
++	 * FSR is word-counted for the supported packed stereo formats.
++	 */
++	if (pos >= audio->buffer_bytes || queued > audio->buffer_bytes)
++		return 0;
++	return (pos + audio->buffer_bytes - queued) % audio->buffer_bytes;
+ }
+ 
+ static enum hrtimer_restart x2000_poll(struct hrtimer *timer)
+@@ -216,6 +225,7 @@ static int x2000_prepare(struct snd_soc_component *component,
+ 	hrtimer_cancel(&audio->timer);
+ 	x2000_stop(audio);
+ 	writel(2, audio->base + DCR);
++	writel(BIT(2), audio->base + FCR);
+ 	udelay(100);
+ 	writel(0x3c, audio->base + DSR);
+ 	/* Stock descriptor: incrementing buffer, 32-byte burst, self link. */

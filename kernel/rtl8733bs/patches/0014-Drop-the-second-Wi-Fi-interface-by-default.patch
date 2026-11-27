@@ -1,0 +1,40 @@
+From c7e3c696e3a9c1a93b282ff8d2a58cc55dfc1e61 Mon Sep 17 00:00:00 2001
+From: Nova <361320585+q2-nova@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 03:00:00 -0600
+Subject: [PATCH] Drop the second Wi-Fi interface by default
+
+The Q2 build has CONFIG_CONCURRENT_MODE with two interfaces, and with
+CONFIG_IFACE_NUMBER 2 the driver always added wlan1: a second adapter
+(a 268 KiB vmalloc) with its own transmit and receive pools (16 TX
+buffers of 32 KiB before patch 0013). The player and the network
+scripts use wlan0 only.
+
+rtw_virtual_iface_num is now a module parameter here too, default 0,
+read when the card is probed: with Wi-Fi down, write 1 to
+/sys/module/8733bs/parameters/rtw_virtual_iface_num and bring Wi-Fi up
+to add wlan1 again. The code for concurrent mode stays.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ os_dep/linux/os_intfs.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/os_dep/linux/os_intfs.c b/os_dep/linux/os_intfs.c
+index c271985..2be3c31 100644
+--- a/os_dep/linux/os_intfs.c
++++ b/os_dep/linux/os_intfs.c
+@@ -565,7 +565,10 @@ char *rtw_initmac = 0;  /* temp mac address if users want to use instead of the
+ 		int rtw_virtual_iface_num = CONFIG_IFACE_NUMBER - 1;
+ 		module_param(rtw_virtual_iface_num, int, 0644);
+ 	#else
+-		int rtw_virtual_iface_num = 1;
++		/* Q2: wlan0 only (0); 1 adds the second interface. Read when the
++		 * card is probed: write it while Wi-Fi is down. */
++		int rtw_virtual_iface_num = 0;
++		module_param(rtw_virtual_iface_num, int, 0644);
+ 	#endif
+ 
+ #ifdef CONFIG_P2P
+-- 
+2.56.0
+

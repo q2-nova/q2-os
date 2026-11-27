@@ -1,0 +1,2 @@
+# Unified diff context prefixes precede the upstream file's tabs.
+*.patch whitespace=-space-before-tab

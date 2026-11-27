@@ -1,0 +1,27 @@
+#!/bin/sh
+# Explicitly enable diagnostic update transport; never writes a selector.
+set -eu
+modprobe fixed
+modprobe sdhci-ingenic-x2000
+modprobe mmc_block
+modprobe vfat
+modprobe exfat
+modprobe nls_utf8
+modprobe nls_cp437
+modprobe nls_iso8859_1
+modprobe ofpart
+modprobe spi-ingenic-sfc
+modprobe spinand
+# A missing partition parser must never be mistaken for the expected map.
+[ "$(wc -l < /proc/mtd)" -eq 2 ] && grep -q '"ota"' /proc/mtd || {
+    echo 'Unexpected MTD layout; refusing update setup' >&2; exit 1;
+}
+mkdir -p /mnt/mmc
+# mmc0 alias is the physical microSD, not the MSC1 Wi-Fi slot.
+waited=0
+until [ -b /dev/mmcblk0p1 ]; do
+    [ "$waited" -lt 10 ] || { echo 'No card partition /dev/mmcblk0p1' >&2; exit 1; }
+    sleep 1; waited=$((waited + 1))
+done
+mountpoint -q /mnt/mmc || mount -o rw,nosuid,nodev,noexec /dev/mmcblk0p1 /mnt/mmc
+echo 'Card mounted at /mnt/mmc. ota transport available; recovery NOT selected.'

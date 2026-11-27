@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+link=yes
+for arg do case "$arg" in -c|-E|-S) link=no;; esac; done
+if [ "$link" = yes ]; then
+    set -- -fuse-ld=lld -B "$Q2_LLD_DIR" -nostartfiles -nodefaultlibs -no-pie \
+        -Wl,--dynamic-linker=/lib/ld-linux-mipsn8.so.1 -Wl,-z,noexecstack \
+        -L "$Q2_SYSROOT/lib" "$Q2_START" "$@" -lc -lgcc_s
+fi
+exec clang --target=mipsel-linux-gnu -march=mips32r2 -mfp64 -mnan=2008 -mabs=2008 -mabicalls \
+    -nostdlibinc -isystem "$Q2_SYSROOT/usr/include/mipsel-linux-gnu" -isystem "$Q2_SYSROOT/usr/include" "$@"

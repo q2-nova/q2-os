@@ -1,0 +1,200 @@
+#!/bin/sh
+# Installed retained-RAM suspend. All application state must be acknowledged
+# before invocation. Kernel freezer/device PM owns networking during the sleep.
+set -eu
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+RUN=/run/q2
+APP=/run/q2nd
+SYS=/sys
+PROC=/proc
+SUPERVISOR=/etc/init.d/S79q2-supervisor
+STATE_STATUS=/run/q2/state-status
+NETWORK=/run/q2-network
+CTRL=/run/wpa_supplicant
+umask 077
+fail() { echo "q2-system-sleep: $*" >&2; exit 1; }
+local_storage() {
+    [ "$(cat "$STATE_STATUS" 2>/dev/null)" = ready ] || return 1
+    [ ! -d "$RUN/usb-storage" ] || [ "$(cat "$RUN/usb-storage/phase" 2>/dev/null)" = local-ready ]
+}
+number() {
+    value=$(cat "$1") || return 1
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$value"
+}
+resume_failures() {
+    for stage in failed_resume failed_resume_early failed_resume_noirq; do
+        number "$SYS/power/suspend_stats/$stage" || return 1
+    done
+}
+proof_snapshot() {
+    awk '
+      BEGIN {
+          count=split("attempts core_returns core_failures valid stage error entry_ddrc entry_phy saved_status resume_status rtc_enter rtc_exit roundtrip roundtrip_returns roundtrip_failures cpu_only cpu_only_returns cpu_only_failures entry_opcr entry_lcr saved_epc epc_restore", names);
+          for (i=1;i<=count;i++) required[names[i]]=1;
+          split("entry_ddrc entry_phy saved_status resume_status entry_opcr entry_lcr saved_epc", hexnames);
+          for (i in hexnames) hexfield[hexnames[i]]=1;
+      }
+      NR != 1 { bad=1 }
+      { for (i=1;i<=NF;i++) {
+          if (split($i,p,"=") != 2) { bad=1; continue; }
+          if (p[1] in required) {
+              if (p[1] in value) bad=1;
+              if (p[1] in hexfield) {
+                  if (p[2] !~ /^0x[0-9a-fA-F]+$/ || length(p[2]) != 10) bad=1;
+              } else if (p[1] == "error") {
+                  if (p[2] !~ /^-?(0|[1-9][0-9]*)$/ || p[2]+0 < -4095 || p[2]+0 > 4095) bad=1;
+              } else if (p[2] !~ /^(0|[1-9][0-9]*)$/ || p[2]+0 > 4294967295) bad=1;
+              value[p[1]]=p[2];
+          }
+      } }
+      END {
+          for (key in required) if (!(key in value)) bad=1;
+          if (bad || NR != 1) exit 1;
+          for (i=1;i<=count;i++) printf "%s%s", value[names[i]], i==count ? "\n" : " ";
+      }' "$SYS/kernel/q2_suspend/proof"
+}
+verify_proof() {
+    # Snapshot output contains only validated decimal/hex tokens; no eval or
+    # kernel text enters commands. Accept only the qualified non-reset SLEEP
+    # mode, not diagnostic DDR roundtrips or CPU-reset returns.
+    set -- $proof_before
+    proof_attempts=$1 proof_returns=$2 proof_failures=$3
+    proof_roundtrip_returns=${14} proof_roundtrip_failures=${15}
+    proof_cpu_returns=${17} proof_cpu_failures=${18}
+    proof_after=$(proof_snapshot) || fail 'core suspend evidence unavailable'
+    set -- $proof_after
+    [ "$1" -eq "$((proof_attempts+1))" ] && [ "$2" -eq "$((proof_returns+1))" ] &&
+        [ "$3" = "$proof_failures" ] && [ "$4" = 1 ] && [ "$5" = 7 ] && [ "$6" = 0 ] ||
+        fail 'core suspend completion was not verified'
+    proof_ddrc=$7 proof_phy=$8
+    [ "$((proof_ddrc & 4))" = 4 ] && [ "$((proof_phy & 2))" = 2 ] ||
+        fail 'core DDR self-refresh was not verified'
+    [ "${13}" = 0 ] && [ "${14}" = "$proof_roundtrip_returns" ] &&
+        [ "${15}" = "$proof_roundtrip_failures" ] && [ "${16}" = 0 ] &&
+        [ "${17}" = "$proof_cpu_returns" ] && [ "${18}" = "$proof_cpu_failures" ] &&
+        [ "${22}" = 0 ] || fail 'diagnostic suspend mode was not excluded'
+    proof_status=${10} proof_opcr=${19} proof_lcr=${20}
+    [ "$((proof_status & 7))" = 0 ] && [ "$((proof_lcr & 3))" = 1 ] &&
+        [ "$((proof_opcr & 0xc470001c))" = 1081081876 ] ||
+        fail 'retained SLEEP clock/reset state was not verified'
+    [ "${12}" -ge "${11}" ] || fail 'core RTC return order was not verified'
+}
+normal_capability() {
+    [ "$(cat "$SYS/kernel/q2_suspend/entry_policy" 2>/dev/null)" = 'version=1 normal_retained=1' ] &&
+        [ -r "$SYS/kernel/q2_suspend/proof" ]
+}
+wpa_identity() {
+    [ -f "$NETWORK/wpa.pid" ] && [ ! -L "$NETWORK/wpa.pid" ] || return 1
+    wpa_pid=$(cat "$NETWORK/wpa.pid") || return 1
+    case "$wpa_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$wpa_pid" -gt 1 ] && kill -0 "$wpa_pid" 2>/dev/null || return 1
+    [ "$(cat "$PROC/$wpa_pid/comm")" = wpa_supplicant ] || return 1
+    # The admitted comm has no spaces: the process start-time field is unambiguous.
+    wpa_start=$(awk '{print $22}' "$PROC/$wpa_pid/stat") || return 1
+    case "$wpa_start" in ''|*[!0-9]*) return 1 ;; esac
+    [ -S "$CTRL/wlan0" ] && [ ! -L "$CTRL/wlan0" ] || return 1
+    printf '%s %s\n' "$wpa_pid" "$wpa_start"
+}
+wpa_command() { timeout -k 1 5 /usr/sbin/wpa_cli -p "$CTRL" -i wlan0 "$1"; }
+network_prepare() {
+    wpa_owner=
+    if [ -e "$NETWORK/wpa.pid" ] || [ -L "$NETWORK/wpa.pid" ]; then
+        wpa_owner=$(wpa_identity) || return 1
+    else
+        [ ! -e "$CTRL/wlan0" ] && [ ! -L "$CTRL/wlan0" ] || return 1
+    fi
+}
+network_suspend() {
+    [ -n "$wpa_owner" ] || return 0
+    [ "$(wpa_identity)" = "$wpa_owner" ] || return 1
+    # A failed/ambiguous command may still have reached the same supplicant.
+    # Cleanup owes it RESUME; never send either event to a replacement process.
+    wlan_notified=1
+    wpa_reply=$(wpa_command suspend 2>&1) || return 1
+    [ "$wpa_reply" = OK ] && [ "$(wpa_identity)" = "$wpa_owner" ]
+}
+network_resume() {
+    [ "$wlan_notified" = 1 ] || return 0
+    [ "$(wpa_identity)" = "$wpa_owner" ] || return 1
+    wpa_reply=$(wpa_command resume 2>&1) || return 1
+    [ "$wpa_reply" = OK ] && [ "$(wpa_identity)" = "$wpa_owner" ] || return 1
+    wlan_notified=0
+}
+kernel_suspend() { printf 'mem\n' > "$SYS/power/state"; }
+suspend_system() {
+    local_storage || fail 'local storage unavailable or exported'
+    normal_capability || fail 'normal retained sleep is unavailable in this kernel'
+    grep -qw mem "$SYS/power/state" || fail 'kernel mem suspend unavailable'
+    if [ -e "$SYS/power/pm_test" ]; then
+        mode=$(cat "$SYS/power/pm_test") || fail 'kernel PM test mode unreadable'
+        case " $mode " in *' [none] '*) ;; *) fail 'kernel PM test mode is active; genuine suspend refused' ;; esac
+    fi
+    if [ -e "$SYS/power/mem_sleep" ]; then
+        mode=$(cat "$SYS/power/mem_sleep") || fail 'kernel mem sleep mode unreadable'
+        case " $mode " in *' [deep] '*) ;; *) fail 'deep mem suspend is not selected' ;; esac
+    fi
+    [ -s "$APP/player.pid" ] && [ -e "$APP/ready" ] || fail 'installed player is not ready'
+    # Only public kernel state is read; no card config, credentials or library.
+    boot=$(cat "$PROC/sys/kernel/random/boot_id")
+    charge=$(cat "$SYS/class/power_supply/axp20x-battery/charge_behaviour")
+    success=$(number "$SYS/power/suspend_stats/success") || fail 'suspend success evidence unavailable'
+    failures=$(number "$SYS/power/suspend_stats/fail") || fail 'suspend failure evidence unavailable'
+    resume_errors=$(resume_failures) || fail 'resume evidence unavailable'
+    proof_before=$(proof_snapshot) || fail 'core suspend evidence unreadable'
+    network_prepare || fail 'network ownership unavailable'
+    # Stop only supervision, preserving the application, decoder, PCM, network
+    # identity and local storage mounts in RAM. Stop failure must abort suspend.
+    supervision=1
+    "$SUPERVISOR" stop || fail 'supervisor could not disarm'
+    local_storage || fail 'storage ownership changed during preparation'
+    sync || fail 'storage sync failed'
+    network_suspend || fail 'network suspend notification failed'
+    # Wakeup-count handshake rejects a wake event racing final preparation.
+    wake=$(number "$SYS/power/wakeup_count") || fail 'wakeup counter unavailable'
+    printf '%s\n' "$wake" > "$SYS/power/wakeup_count" || fail 'wake event raced preparation'
+    echo suspending > "$RUN/sleep-status"
+    kernel_suspend || fail 'kernel refused suspend'
+    network_resume || fail 'network resume notification failed'
+    [ "$(cat "$PROC/sys/kernel/random/boot_id")" = "$boot" ] || fail 'boot identity changed'
+    [ "$(number "$SYS/power/suspend_stats/success")" -gt "$success" ] || fail 'kernel did not complete suspend'
+    [ "$(number "$SYS/power/suspend_stats/fail")" = "$failures" ] || fail 'kernel reported resume failure'
+    [ "$(resume_failures)" = "$resume_errors" ] || fail 'device resume callback failed'
+    verify_proof
+    local_storage || fail 'storage ownership was not restored'
+    [ "$(cat "$SYS/class/power_supply/axp20x-battery/charge_behaviour")" = "$charge" ] || fail 'charge inhibition changed across suspend'
+    echo resumed > "$RUN/sleep-status"
+}
+main() {
+    [ "$#" = 0 ] || fail 'usage: q2-system-sleep'
+    [ "$(id -u)" = 0 ] || fail 'root is required'
+    mkdir -p "$RUN" "$APP"
+    mkdir "$RUN/usb-storage.lock" 2>/dev/null || fail 'storage operation is busy'
+    control=0
+    supervision=0
+    network=0
+    wlan_notified=0
+    cleanup() {
+        result=$?
+        trap - EXIT HUP INT TERM
+        if ! network_resume; then result=1; fi
+        if [ "$supervision" = 1 ]; then
+            "$SUPERVISOR" start || result=1
+        fi
+        [ "$result" = 0 ] || echo failed > "$RUN/sleep-status"
+        [ "$control" = 0 ] || rmdir "$APP/control.lock"
+        [ "$network" = 0 ] || rmdir "$NETWORK/control.lock"
+        rmdir "$RUN/usb-storage.lock"
+        exit "$result"
+    }
+    trap cleanup EXIT
+    trap 'exit 1' HUP INT TERM
+    mkdir "$APP/control.lock" 2>/dev/null || fail 'service operation is busy'
+    control=1
+    mkdir -p "$NETWORK"
+    mkdir "$NETWORK/control.lock" 2>/dev/null || fail 'network operation is busy'
+    network=1
+    suspend_system
+}
+if [ "${Q2_SLEEP_SOURCE_ONLY:-0}" != 1 ]; then main "$@"; fi
