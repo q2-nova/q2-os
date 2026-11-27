@@ -105,6 +105,7 @@ kernel_suspend() {
     [ "$FAIL" != reboot ] || echo other-boot > "$PROC/sys/kernel/random/boot_id"
     [ "$FAIL" != charge ] || echo '[auto] inhibit-charge' > "$SYS/class/power_supply/axp20x-battery/charge_behaviour"
     [ "$FAIL" != storage ] || echo exported > "$RUN/usb-storage/phase"
+    [ "$FAIL" != nonempty-lock ] || : > "$APP/control.lock/held"
     if [ -f "$SYS/kernel/q2_suspend/proof" ]; then printf '%s\n' "$PROOF_AFTER" > "$SYS/kernel/q2_suspend/proof"; fi
     return 0
 }
@@ -124,6 +125,14 @@ main
         self.assertEqual((self.root / 'run/sleep-status').read_text(), 'resumed\n')
         self.assertFalse((self.root / 'run/usb-storage.lock').exists())
         self.assertFalse((self.root / 'app/control.lock').exists())
+
+    def test_partial_lock_release_keeps_failed_state_and_releases_other_owned_locks(self):
+        result, _ = self.run_helper('nonempty-lock')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root/'run/sleep-status').read_text(), 'failed\n')
+        self.assertTrue((self.root/'app/control.lock/held').is_file())
+        self.assertFalse((self.root/'network/control.lock').exists())
+        self.assertFalse((self.root/'run/usb-storage.lock').exists())
 
     def test_retained_drm_joins_after_supervision_and_disarms_on_errors(self):
         for fault in ('', 'display', 'mem', 'start'):

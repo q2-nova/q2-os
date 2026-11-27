@@ -224,9 +224,10 @@ main() {
             [ "$result" != 0 ] || echo resumed > "$RUN/sleep-status"
         fi
         [ "$result" = 0 ] || echo failed > "$RUN/sleep-status"
-        [ "$control" = 0 ] || rmdir "$APP/control.lock"
-        [ "$network" = 0 ] || rmdir "$NETWORK/control.lock"
-        rmdir "$RUN/usb-storage.lock"
+        set -- "$RUN/usb-storage.lock"
+        [ "$network" = 0 ] || set -- "$NETWORK/control.lock" "$@"
+        [ "$control" = 0 ] || set -- "$APP/control.lock" "$@"
+        rmdir "$@" || { echo failed > "$RUN/sleep-status"; result=1; }
         exit "$result"
     }
     trap cleanup EXIT
