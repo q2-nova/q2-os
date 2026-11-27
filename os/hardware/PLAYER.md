@@ -18,7 +18,7 @@ generated Dropbear host key. The image never takes a key, root filesystem or
 configuration from a used device.
 
 ```sh
-KSRC=build/os/player-hardware-src kernel/prepare.sh
+python3 os/install/prepare.py --dest build/os/player-hardware-src
 python3 os/hardware/build-wifi-tools.py --buildroot-output BUILDROOT_OUTPUT
 python3 os/hardware/build-player.py \
   --kernel-source build/os/player-hardware-src \
@@ -27,11 +27,12 @@ python3 os/hardware/build-player.py \
   --wifi-tools build/os/hardware-wifi-tools
 ```
 
-The builder applies the RAM-handoff patches from `kernel/ram-handoff/patches/`,
-the patches in `os/hardware/patches/` and the watchdog patch from
-`os/patches/kernel/` to a prepared kernel tree. `kernel/prepare.sh` and
-`kernel/ram-handoff/` are not in this repository yet, so the build needs a
-kernel tree prepared outside it.
+The kernel source is a dedicated checkout of the production Linux revision
+in `os/sources.json`; the builder refuses any other revision. It edits that
+tree's device tree in place (command line, 32 kHz sleep clock for the
+RTL8733BS, SFC disabled) and applies the patches in `os/hardware/patches/`
+and the watchdog patch from `os/patches/kernel/` where the revision does not
+already carry them.
 
 - `--player-binary` and `--platform-library` copy a generated `q2nd` and
   `libq2platform.so` into the image without changing the Buildroot target.

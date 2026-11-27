@@ -18,8 +18,8 @@ A candidate goes to its own directory. Its hashes differ from the pinned
 ones, so the image build refuses it; it is for `q2nd --bt-probe --firmware DIR`.
 
 Nothing here runs code from the archive. Extraction uses `unsquashfs`
-(squashfs-tools, from PATH or the rig SDK) or `unsquashfs-backhand`
-(`cargo install --locked backhand-cli`).
+(squashfs-tools, from PATH or the generated SDK in build/os/out/host) or
+`unsquashfs-backhand` (`cargo install --locked backhand-cli`).
 """
 import argparse
 import hashlib
@@ -38,6 +38,8 @@ import zipfile
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / 'build/firmware/bluetooth'
+# Buildroot builds host squashfs-tools for the image (os/build.py build).
+SDK_UNSQUASHFS = ROOT / 'build/os/out/host/bin/unsquashfs'
 DEFAULT_CACHE = ROOT / 'build/firmware/downloads'
 
 # The files os/install/build.py --bluetooth-firmware accepts (name -> SHA-256).
@@ -170,14 +172,8 @@ def find_unsquashfs():
     tool = shutil.which('unsquashfs')
     if tool:
         return 'squashfs-tools', tool
-    try:
-        sys.path.insert(0, str(ROOT / 'tools'))
-        import rig_config
-        sdk = rig_config.path('sdk') / 'bin/unsquashfs'
-        if sdk.is_file():
-            return 'squashfs-tools', str(sdk)
-    except Exception:  # an unconfigured rig is not an error here
-        pass
+    if SDK_UNSQUASHFS.is_file():
+        return 'squashfs-tools', str(SDK_UNSQUASHFS)
     tool = shutil.which('unsquashfs-backhand')
     if tool:
         return 'backhand', tool

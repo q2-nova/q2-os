@@ -19,7 +19,7 @@ result=subprocess.run(command,capture_output=True,text=True,timeout=20)
 assert result.returncode!=0 and '-kernel xImage is required' in result.stderr,(result.returncode,result.stderr)
 report={'test_run':os.environ.get('Q2_OS_ACCEPTANCE_ID'),'gate_test_passed':True,'stock_bootstrap_validated':False,'emulation_only':True,'source_commit':receipt['source_commit'],
     'qemu_sha256':sha(qemu),'q2_source_sha256':sha(source),'without_kernel_exit_code':result.returncode,'diagnostic':result.stderr.strip(),
-    'reset_entry':'loaded kernel entry, post-bootloader setup','power_notes':'docs/firmware-trials.md',
+    'reset_entry':'loaded kernel entry, post-bootloader setup',
     'remaining_requirement':'BootROM/U-Boot execution and a one-shot removable-media entry that leaves the stock default unchanged; separately qualify physical recovery before any hardware trial'}
 out = WORK / 'tests' / ('bootstrap-gate-' + uuid.uuid4().hex[:10])
 out.mkdir(parents=True)

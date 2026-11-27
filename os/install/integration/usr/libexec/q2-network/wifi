@@ -54,8 +54,7 @@ msc1_driver() {
 }
 # Power the chip off: unbinding MSC1 removes the SDIO card and lets the host's
 # power sequence drop the chip's enable lines. With the interface merely down
-# the 8733bs still draws 39 mW (docs/validation/quick-experiments.md,
-# quick-wifi-chip-01). An unknown host driver is left alone.
+# the 8733bs still draws 39 mW. An unknown host driver is left alone.
 power_off() {
     [ -e "$SYS/bus/platform/devices/$MSC1/driver" ] || return 0
     driver=$(readlink -f "$SYS/bus/platform/devices/$MSC1/driver") || return 0
@@ -79,7 +78,7 @@ power_on() {
 # while still linked, limits only the supplicant's first scan after start
 # (initial_freq_list, a -I overlay). Every later scan is full-band, so a moved
 # or absent AP falls back by itself. The full first scan took about 4.1 s of
-# the 6.5 s to an address (docs/validation/quick-experiments.md, wifi-trace-01).
+# the 6.5 s to an address.
 record_channel() {
     [ "$(cat "$SYS/class/net/$IFACE/carrier" 2>/dev/null || echo 0)" = 1 ] || return 0
     ch=$(sed -n 's/^cur_channel=\([0-9]*\),.*/\1/p' "$PROC/net/rtl8733bs/$IFACE/ap_info" 2>/dev/null | head -1)

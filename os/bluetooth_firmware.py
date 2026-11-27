@@ -4,7 +4,13 @@ Realtek's Bluetooth patch and configuration for the RTL8733BS, as shipped in
 Shanling's V1.32 update under /firmware/rtlbt. The source tree carries only
 the digests. Local and release stock hardware builds acquire and verify the
 exact two files separately. q2nd searches /lib/firmware/rtlbt first.
-Used by os/install/build.py and tests/perf/release_kernel_image.py.
+Used by os/install/build.py.
+
+The kernel side is in the production Linux revision (os/sources.json
+linux_production): the device tree muxes UART0 for Bluetooth and adds the
+bt-power enable hold, and the defconfig enables
+CONFIG_REGULATOR_USERSPACE_CONSUMER and leaves the kernel Bluetooth subsystem
+out (the host stack is in q2nd).
 """
 import hashlib
 from pathlib import Path
@@ -18,7 +24,9 @@ FILES = {
 DIRECTORY = 'lib/firmware/rtlbt'
 DIRECTORIES = ('lib/firmware', DIRECTORY)
 TARGETS = tuple(DIRECTORY + '/' + name for name in FILES)
-PATCH = 'kernel/patches/0181-MIPS-Q2-mux-UART0-for-Bluetooth-and-add-a-Bluetooth-enable-hold.patch'
+# Files of the production Linux revision that carry the kernel side.
+DEVICE_TREE = 'arch/mips/boot/dts/ingenic/shanling-q2.dts'
+DEFCONFIG = 'arch/mips/configs/shanling_q2_production_defconfig'
 
 
 def sha(path):

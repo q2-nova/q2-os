@@ -1,7 +1,9 @@
 """Exact packaged app resources shared by fresh builds and release composition.
 
-Only generated build trees are inputs. Reject symlinks before reading sources or
-writing destinations; this is not a sandbox against concurrent tree mutation.
+FILES maps each installed path to its path in the q2-player checkout the
+player was built from. Only generated build trees are inputs. Reject symlinks
+before reading sources or writing destinations; this is not a sandbox against
+concurrent tree mutation.
 """
 import hashlib
 from pathlib import Path, PurePosixPath

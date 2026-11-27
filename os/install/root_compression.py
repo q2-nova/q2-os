@@ -5,12 +5,11 @@ its mksquashfs arguments. The kernel that boots the image must read the
 compressor: composers that ship their own kernel check its .config; those
 that keep the base kernel keep the base image's compressor.
 
-zstd19-128k is the zstd setting chosen in
-docs/validation/sfc-dma-zstd-root-2026-11-18.md: level 19 gives the smallest
-zstd root (22 is no smaller) at no host decompression cost over lower levels,
-and 128 KiB blocks match the kernel's 128 KiB fault-around reads. The
-pm-q2-perf-sfc recipe still records xz-128k until the device measures zstd
-decompression; `configure --root-compression zstd19-128k` selects it.
+zstd19-128k is the zstd setting: level 19 gives the smallest zstd root (22
+is no smaller) at no host decompression cost over lower levels, and 128 KiB
+blocks match the kernel's 128 KiB fault-around reads. The default stays
+xz-128k until zstd decompression is measured on the device;
+`--root-compression zstd19-128k` selects it.
 """
 from pathlib import Path
 import struct

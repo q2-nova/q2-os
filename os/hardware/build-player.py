@@ -2,7 +2,9 @@
 """Build a RAM-only full-userspace hardware qualification image.
 
 Inputs must be a generated Buildroot target and generated qualification SSH
-keys. Prepare --kernel-source with kernel/prepare.sh first. No device access.
+keys. --kernel-source is a dedicated checkout of the production Linux revision
+(os/sources.json linux_production), prepared with os/install/prepare.py; the
+builder edits its device tree in place. No device access.
 """
 import argparse
 import hashlib
@@ -12,10 +14,13 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 from ssh_provision import client_public_key, host_identity, write_key
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = ROOT / 'os/hardware'
+sys.path.insert(0, str(ROOT / 'os'))
+from build import LOCK  # noqa: E402
 
 def run(args, **kw):
     subprocess.run([str(a) for a in args], check=True, **kw)
@@ -61,28 +66,29 @@ def main():
         host_key_bytes, host_key = host_identity(a.host_key, a.buildroot_target, a.qemu_user)
     except ValueError as error:
         p.error(str(error))
+    commit = subprocess.run(['git', '-C', src, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    if commit != LOCK['linux_production']['commit']:
+        p.error('--kernel-source must be a checkout of the production Linux revision (os/install/prepare.py)')
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
     out.chmod(0o700)
-    patches = []
-    for number in ('0002', '0003', '0004', '0006'):
-        patches += list((ROOT / 'kernel/ram-handoff/patches').glob(number + '-*.patch'))
-    patches += sorted((HERE / 'patches').glob('*.patch'))
+    # The production revision carries the X2000 L2-cache, interrupt-vector,
+    # EBase, ERET and 32 kHz clock-output changes; these are already applied
+    # there too and are skipped when they are.
+    patches = sorted((HERE / 'patches').glob('*.patch'))
     patches += list((ROOT / 'os/patches/kernel').glob('*watchdog*.patch'))
     for patch in patches:
         done = subprocess.run(['git', '-C', src, 'apply', '--reverse', '--check', patch], capture_output=True)
         if done.returncode:
             run(['git', '-C', src, 'apply', patch])
-    # Generic pinctrl part of the qualified sleep-clock patch. The normal
-    # board DT differs from the diagnostic board used in the original patch.
-    clock_patch = next((ROOT / 'kernel/ram-handoff/patches').glob('0007-*.patch'))
-    clock = clock_patch.read_bytes().split(b'--- a/arch/mips/boot/dts/')[0]
-    done = subprocess.run(['git', '-C', src, 'apply', '--reverse', '--check'], input=clock, capture_output=True)
-    if done.returncode: run(['git', '-C', src, 'apply'], input=clock)
     dt = src / 'arch/mips/boot/dts/ingenic/shanling-q2.dts'
     board = dt.read_text().replace(' earlycon ', ' ')
-    if 'clk32k_pins:' not in board:
+    # The RTL8733BS sleep clock: the 32 kHz output on MSC1's pins.
+    if 'groups = "clk32k"' not in board:
         board += '\n&pinctrl { clk32k_pins: clk32k-pins { function = "clk32k"; groups = "clk32k"; }; };\n&msc1 { pinctrl-0 = <&msc1_pins &clk32k_pins>; };\n'
     board = hardware_bootargs(board, a.boot_cpus)
+    # The RAM image never reaches NAND; the last &sfc node wins.
+    if not board.rstrip().endswith('&sfc { status = "disabled"; };'):
+        board = board.rstrip() + '\n&sfc { status = "disabled"; };\n'
     dt.write_text(board)
     root = out / 'root'
     if root.exists(): shutil.rmtree(root)
@@ -175,8 +181,8 @@ def main():
         'profile': 'RAM-only application qualification', 'hardware_qualified': False,
         'boot_cpus': a.boot_cpus,
         'bootstrap_host_key': host_key,
-        'kernel_series': {x.name: sha(x) for x in (ROOT / 'kernel/patches').glob('*.patch')},
-        'hardware_patches': {str(x.relative_to(ROOT)): sha(x) for x in patches + [clock_patch]},
+        'kernel_source_commit': commit,
+        'hardware_patches': {str(x.relative_to(ROOT)): sha(x) for x in patches},
         'artifacts': {n: sha(out / n) for n in ('vmlinux', 'shanling-q2.dtb', 'root.cpio')},
         'player_sha256': sha(root / 'usr/bin/q2nd'), 'config_sha256': sha(kout / '.config'),
         'builder_sha256': sha(__file__), 'init_sha256': sha(HERE / 'player-init'),

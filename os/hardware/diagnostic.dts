@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* SPL diagnostic tree, derived from kernel/ram-handoff. Not the normal player board description. */
+/* SPL diagnostic tree for build-diagnostic.py. Not the normal player board description. */
 /dts-v1/;
 #include "x2000.dtsi"
 

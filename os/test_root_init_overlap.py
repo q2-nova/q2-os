@@ -115,9 +115,11 @@ class Overlap(unittest.TestCase):
         for mode in ('state-fail','peripheral-fail','peripheral-early-fail','loopback-fail'):
             with self.subTest(mode=mode):self.run_init(mode)
     def test_retained_serial_source_cannot_overlap_both_phase_barriers(self):
-        source=(ROOT/'tests/perf/fixtures/historical/root-init-serial.sh').read_bytes()
+        # The serial root-init that ran the phases in turn. The harness stubs
+        # its ifconfig and dropbear calls, so the fixture omits their addresses.
+        source=(ROOT/'os/test_root_init_overlap_serial.sh').read_bytes()
         self.assertEqual(hashlib.sha256(source).hexdigest(),
-                         '1c96b29841bfefc96685f3c252738ad7b25d34a02d0b18d9e339a0031ead871d')
+                         'd1206dcb792ddd3c464f62277598924e51fe2878b6c5d3c0c8f7b9e41bdc9ea5')
         history=self.run_init(source=source.decode(),expect_overlap=False)
         self.assertLess(history.index('state-end'),history.index('peripheral-enter'))
 

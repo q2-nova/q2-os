@@ -6,7 +6,7 @@ import stat
 import subprocess
 
 NAME = 'q2-portal'
-SOURCE = 'crates/portal/Cargo.toml'
+SOURCE = 'crates/portal/Cargo.toml'  # in the q2-player checkout
 INSTALLED = 'usr/libexec/q2-network/q2-portal'
 PROTOCOL = 1
 CHECKPOINT_FILES = (NAME, 'symbols/q2-portal/receipt.json',

@@ -4,10 +4,10 @@
   python3 os/test_memory_guard.py --replay BLOCK...    # monitored blocks
 
 --replay runs the policy over the `M` samples of stream.txt in each block
-directory of tests/perf/msa_stall_probe.py and prints, per block, the thrash
-seconds (samples with 50 or more major faults) and each action with the
-thrash seconds before it. It replays the recorded samples as they were: a
-kill would have changed what followed.
+directory (lines `TIME M ... avail=KB maj=FAULTS`, one a second) and prints,
+per block, the thrash seconds (samples with 50 or more major faults) and each
+action with the thrash seconds before it. It replays the recorded samples as
+they were: a kill would have changed what followed.
 """
 from pathlib import Path
 import subprocess
@@ -18,7 +18,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 # (MemAvailable kB, major faults in the second), one sample a second,
-# V0.122 and V0.123, 2026-11-20 (build/hardware of the stall worktree).
+# V0.122 and V0.123.
 HEALTHY = [(31724, 0), (32136, 12), (32124, 55), (31284, 61), (31540, 42), (30732, 48), (23900, 72), (31616, 0)]
 M8 = [(18208, 0), (15744, 10), (18544, 17), (21316, 0)] * 5
 # stall-v123-m16-sup-01: 16 MB taken soon after boot, no thrash.

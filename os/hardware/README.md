@@ -1,8 +1,8 @@
 # Connected hardware diagnostic (work in progress)
 
-The device owner approved normal `update.tar` installation, USB networking, and subsequent
-OS updates, with Previous + Center stock recovery preserved. This directory
-prepares that path; no artifact here is hardware-qualified yet.
+This directory prepares normal `update.tar` installation, USB networking and
+later OS updates, with Previous + Center stock recovery preserved. No artifact
+here is hardware-qualified yet.
 
 The existing `os/image.py` SD image and `uImage.gz` are emulator artifacts. The
 stock SPL loads a uImage payload and jumps into it; it does not provide the
@@ -19,22 +19,22 @@ writes. A minimal profile without those devices cannot yet self-update.
 
 Hardware USB address: device `192.168.77.2/30`, host `192.168.77.1/30`; no DHCP,
 DNS or default route. The emulator test subnet is an explicit separate profile.
-Provide an SSH **public** key outside Git when building. Do not read owner private keys or
-configuration. Host-key generation requires initialized kernel entropy; any
+Provide an SSH **public** key outside Git when building. The build reads no
+private key or configuration from a used device. Host-key generation requires initialized kernel entropy; any
 emulator entropy injection is a synthetic fixture, never a hardware entropy claim.
 
 Before hardware: exact-package SPL boot, USB/SSH transfer and reconnect, normal
 recovery install, next-version install, corrupt-main key recovery, stock restore,
 protected-partition comparison and durability/failure checks must pass. The
-new d89c735 OS pin has a recorded black-KMS failure and is not adopted globally.
-A diagnostic-specific test does not clear the full player's failed acceptance.
+diagnostic kernel has its own pin; a diagnostic boot does not qualify the full
+player.
 
 ## Build and host checks
 
 Use the generated target of the stable Buildroot build (`os/build.py build`).
 Only BusyBox, Dropbear and their dynamic libraries are copied; their hashes are
-recorded. The diagnostic kernel pins d89c735 independently and resolves/audits
-its own config. It does not overwrite the existing OS pin or another worktree.
+recorded. The diagnostic kernel has its own pinned source profile and
+resolves/audits its own config. It does not overwrite the existing OS pin or another worktree.
 
 ```
 python3 os/hardware/build-diagnostic.py --buildroot-target BUILDROOT_OUT/target \
@@ -73,7 +73,7 @@ The input must be a generated full-chip data+OOB NAND with erased identity and
 userdata. This copies the executable kernel into a disposable fixture, boots
 through the real SPL, checks SSH, a bidirectional 131071-byte transfer and USB
 reconnect. `--icount` selects instruction-counted emulation. The fixture's SSH
-identity is generated specifically for the test; never supply an owner key.
+identity is generated specifically for the test; never supply another key.
 Known-host records are isolated under the run directory. The optional `--fixture-entropy` credits fresh host random bytes over the
 emulator UART using BusyBox seedrng and records this in the result. It allows
 deterministic runs to test SSH without pretending to validate physical entropy.
@@ -92,14 +92,14 @@ runner checks kernel/rootfs bytes, erased selector and protected partitions.
   Mainline `arch/mips/boot/compressed/decompress.c` explicitly leaves cache
   flushing as a FIXME; the functional emulator does not model cache coherency.
 - Qualify physical USB enumeration/reconnect, host-key provisioning/entropy and
-  host networking configuration. The USB helper now disables IPv6 on the
+  host networking configuration. The USB helper disables IPv6 on the
   management interface to prevent router-advertisement configuration.
-- The SD/`ota` profile and on-device staging/apply command now pass an emulated
+- The SD/`ota` profile and on-device staging/apply command pass an emulated
   recovery round trip. Physical durability, stock rollback and corrupt-main
-  recovery remain separate qualification steps; the original no-storage profile
-  cannot apply updates.
-- Record recovery's observed userdata changes. The device owner accepted conditional
-  reset on UBI/UBIFS failure; preserving userdata is no longer a release gate.
+  recovery remain separate qualification steps; the no-storage profile cannot
+  apply updates.
+- Record recovery's observed userdata changes. Stock recovery may reset
+  userdata on a UBI/UBIFS failure; preserving userdata is not a release gate.
 - Resolve/keep separate the full player baseline's black-KMS failure; qualify
   watchdog behavior and hardware power policy independently.
 
@@ -111,12 +111,10 @@ loading. `--wifi --updates` also adds manual SD/ota transport, mounted using
 `q2-update-storage`; it is not activated by init. These profiles use XZ kernel
 compression to keep their embedded module set within the 6 MiB slot.
 
-`q2-hw-update check|stage|apply|status` is now included in the diagnostic. The
-original no-storage profile supports package checking but cannot stage/apply to
-hardware without its transport. See [the command and safety contract](../../docs/hardware-os-updates.md).
-Userdata reset on stock recovery mount failure is now explicitly accepted by
-The device owner and is no longer a preservation gate. Hardware cache/boot qualification
-is still open.
+`q2-hw-update check|stage|apply|status` is included in the diagnostic. The
+no-storage profile supports package checking but cannot stage/apply to
+hardware without its transport. Hardware cache/boot qualification is still
+open.
 
 
 `--update-package PACKAGE` exercises the production on-device command through
@@ -127,10 +125,10 @@ stopping Wi-Fi leaves the mounted SD card and its files accessible. These tests
 use disposable NAND/card images and generated SSH identities only.
 
 
-For an authorized physical trial, `--host-key GENERATED_DROPBEAR_HOST_KEY`
-embeds a newly generated device-specific SSH host key. Pin its public key on the
-client before installation. Never supply an owner private key or distribute this
-per-device image. See [the physical trial record](../../docs/hardware-os-trial.md).
+For a physical trial, `--host-key GENERATED_DROPBEAR_HOST_KEY` embeds a newly
+generated device-specific SSH host key. Pin its public key on the client
+before installation. Never supply an existing private key or distribute this
+per-device image.
 The update transport supports both FAT and exFAT cards; Wi-Fi and storage remain
 manually loaded. `rehearse.py --card-filesystem exfat --update-package PACKAGE`
 exercises the exFAT path using a generated card populated over guest USB SSH.
