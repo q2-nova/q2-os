@@ -93,6 +93,7 @@ fi
 bootmark diagnostic-usb-requested
 /sbin/q2-diagnostic-usb && {
     bootmark diagnostic-usb-ready
+    : > /run/q2/diagnostic-usb-ready
     /sbin/q2-diagnostic-ssh > /run/log/ssh 2>&1
 } &
 if [ -n "$peripherals_pid" ] && wait "$peripherals_pid"; then
@@ -147,6 +148,12 @@ else
     echo 'Peripheral bring-up failed; diagnostics retained.'
 fi
 bootmark services-requested
+# Take one bounded snapshot before USB automation can release the card.
+if [ -x /sbin/q2-card-ssh ] &&
+    timeout -k 1 5 /sbin/q2-card-ssh stage > /run/log/card-ssh 2>&1 &&
+    [ -f /run/q2/card-ssh/ready ]; then
+    /sbin/q2-card-ssh serve >> /run/log/card-ssh 2>&1 &
+fi
 bootmark usb-auto-start-begin
 [ ! -x /usr/sbin/q2-usb-auto ] || /usr/sbin/q2-usb-auto start >> /run/log/usb-auto 2>&1
 bootmark usb-auto-start-returned

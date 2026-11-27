@@ -30,6 +30,23 @@ The SDK archive is `build/os/out/images/mipsel-buildroot-linux-gnu_sdk-buildroot
 
 The SDK build uses generated emulator fixtures. For a player-enabled emulator build, supply both a matching `q2nd` and `q2-launcher` in `build/os/out/artifacts/`. The emulator uses a separate public QEMU compatibility revision and its own pinned kernel series. See the [installation build guide](os/install/README.md) for stock-device image assembly and its validation requirements.
 
+## USB SSH from a microSD card
+
+On a normal installed image, put your OpenSSH public key in a file named
+`authorized_keys` at the root of the microSD card. Keep the private key on
+your computer. The file accepts one public key per line, like a normal
+OpenSSH `authorized_keys` file, using options supported by Dropbear.
+
+Boot the Q2 with that card and connect it over USB. Use the host and device
+addresses in the [USB network setup](os/hardware/README.md) and connect
+with `ssh root@<device-address>`. The Q2 generates
+its own persistent host key. The first connection will show a new host
+fingerprint.
+
+The Q2 reads the card file once per boot. Remove the file and reboot to
+revoke access. USB drive export can briefly interrupt the USB connection
+while the device re-enumerates. Reconnect SSH afterward if needed.
+
 ## Licensing
 
 Original standalone Q2 OS code and documentation are licensed under

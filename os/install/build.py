@@ -194,6 +194,8 @@ def main():
         tsrs_artifact.install(tsrs_binary, root)
     ssh.stage(root)
     copy(HERE / 'diagnostic-ssh', root / 'sbin/q2-diagnostic-ssh', 0o755)
+    if not a.qemu_fixture and not a.authorized_key:
+        copy(HERE / 'card-ssh', root / 'sbin/q2-card-ssh', 0o755)
     (root / 'sbin/q2-sim-ready').unlink(missing_ok=True)
     if a.qemu_fixture:
         copy(HERE / 'qemu-ready', root / 'sbin/q2-sim-ready', 0o755)
