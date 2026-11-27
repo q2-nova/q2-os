@@ -91,9 +91,22 @@ verify_proof() {
         [ "${22}" = 0 ] || fail 'diagnostic suspend mode was not excluded'
     proof_status=${10} proof_opcr=${19} proof_lcr=${20}
     [ "$((proof_status & 7))" = 0 ] && [ "$((proof_lcr & 3))" = 1 ] &&
-        [ "$((proof_opcr & 0xc470001c))" = 1081081876 ] ||
+        [ "$((proof_opcr & 0xc470001c))" = "$expected_opcr" ] ||
         fail 'retained SLEEP clock/reset state was not verified'
     [ "${12}" -ge "${11}" ] || fail 'core RTC return order was not verified'
+}
+normal_clock_policy() {
+    path="$SYS/kernel/q2_suspend/normal_exclk"
+    if [ ! -e "$path" ]; then
+        # Older supporting kernels have only the fixed EXCLK-retain policy.
+        value=legacy-retain
+        return 0
+    fi
+    read_value "$path" || return 1
+    case "$value" in
+        'version=1 retain=1'|'version=1 retain=0') return 0 ;;
+        *) return 1 ;;
+    esac
 }
 normal_capability() {
     [ "$(cat "$SYS/kernel/q2_suspend/entry_policy" 2>/dev/null)" = 'version=1 normal_retained=1' ] &&
@@ -164,6 +177,10 @@ suspend_system() {
     failures=$value
     resume_failures || fail 'resume evidence unavailable'
     resume_errors=$resume_counters
+    normal_clock_policy || fail 'normal retained EXCLK policy unreadable'
+    clock_policy=$value
+    expected_opcr=$((0x40700014))
+    [ "$clock_policy" != 'version=1 retain=0' ] || expected_opcr=$((0x40700004))
     proof_before=$(proof_snapshot) || fail 'core suspend evidence unreadable'
     network_prepare || fail 'network ownership unavailable'
     # Stop only supervision, preserving the application, decoder, PCM, network
@@ -192,6 +209,8 @@ suspend_system() {
     number "$SYS/power/suspend_stats/success" && [ "$value" -gt "$success" ] || fail 'kernel did not complete suspend'
     number "$SYS/power/suspend_stats/fail" && [ "$value" = "$failures" ] || fail 'kernel reported resume failure'
     resume_failures && [ "$resume_counters" = "$resume_errors" ] || fail 'device resume callback failed'
+    normal_clock_policy && [ "$value" = "$clock_policy" ] ||
+        fail 'normal retained EXCLK policy changed across suspend'
     verify_proof
     local_storage || fail 'storage ownership was not restored'
     read_value "$SYS/class/power_supply/axp20x-battery/charge_behaviour" && [ "$value" = "$charge" ] || fail 'charge inhibition changed across suspend'

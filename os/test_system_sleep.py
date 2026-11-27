@@ -98,6 +98,8 @@ kernel_suspend() {
     [ "$FAIL" = no-cycle ] || echo 5 > "$SYS/power/suspend_stats/success"
     case "$FAIL" in
         resume-fail) echo 1 > "$SYS/power/suspend_stats/fail" ;;
+        clock-policy-changed) echo 'version=1 retain=1' > "$SYS/kernel/q2_suspend/normal_exclk" ;;
+        clock-policy-removed) rm "$SYS/kernel/q2_suspend/normal_exclk" ;;
         resume-missing) rm "$SYS/power/suspend_stats/failed_resume" ;;
         resume-extra-line) printf '0\n1\n' > "$SYS/power/suspend_stats/fail" ;;
     esac
@@ -231,6 +233,35 @@ main
                 result,events=self.run_helper(proof_after=returned(**changes))
                 self.assertNotEqual(result.returncode,0);self.assertEqual(events[-1],'supervisor start')
                 self.assertEqual((self.root/'run/sleep-status').read_text(),'failed\n');(self.root/'events').unlink()
+
+    def test_explicit_clock_policy_must_match_actual_entry(self):
+        for retain, opcr, fault, passed in (
+            (1, '0x40f01514', '', True),
+            (0, '0x40f01504', '', True),
+            (1, '0x40f01504', '', False),
+            (0, '0x40f01514', '', False),
+            (0, '0x40f0150c', '', False),
+            (0, '0x40f01504', 'clock-policy-changed', False),
+            (0, '0x40f01504', 'clock-policy-removed', False),
+        ):
+            with self.subTest(retain=retain, opcr=opcr, fault=fault):
+                self.tearDown()
+                self.setUp()
+                path = self.root / 'sys/kernel/q2_suspend/normal_exclk'
+                path.write_text(f'version=1 retain={retain}\n')
+                result, events = self.run_helper(fault, proof_after=returned(entry_opcr=opcr))
+                self.assertEqual(result.returncode == 0, passed, result.stderr)
+                self.assertEqual(events[-1], 'supervisor start')
+
+    def test_malformed_clock_policy_stops_before_suspend(self):
+        path = self.root / 'sys/kernel/q2_suspend/normal_exclk'
+        for value in ('', 'version=2 retain=0', 'version=1 retain=2',
+                      'version=1 retain=1\nversion=1 retain=0'):
+            with self.subTest(value=value):
+                path.write_text(value + '\n')
+                result, events = self.run_helper()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(events, [])
 
     def test_proof_counter_offsets_and_numeric_wire_properties(self):
         path = self.root / 'sys/kernel/q2_suspend/proof'
