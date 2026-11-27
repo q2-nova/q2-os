@@ -17,8 +17,8 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'tests/power'))
-from run import ssh, KEYS
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from device_ssh import ssh  # noqa: E402
 
 
 def validate(path):
@@ -66,6 +66,7 @@ def main():
     p.add_argument('image', type=Path)
     p.add_argument('--runner', type=Path, default=ROOT / 'build/recovery/trial')
     p.add_argument('--host', required=True)
+    p.add_argument('--keys', type=Path, default=ROOT / 'build/ssh/device', help="the player's client_ed25519 and known_hosts (q2/ssh/provision.py)")
     p.add_argument('--seconds', type=int, default=30)
     p.add_argument('--lease', type=int, default=6)
     p.add_argument('--jz-watchdog', action='store_true', help='vendor watchdog; qualify reset/recovery before driver trials')
@@ -79,7 +80,7 @@ def main():
     base = f'/run/q2trial-{token}'
     out = ROOT / 'build/recovery' / token
     out.mkdir(parents=True)
-    connection = ssh(args.host, KEYS)
+    connection = ssh(args.host, args.keys)
     def remote(command, **kwargs):
         return subprocess.run(connection + [command], timeout=30, check=True, **kwargs)
     mounted = False

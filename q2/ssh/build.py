@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Build the pinned Dropbear server against the Q2's stock glibc."""
+"""Build the pinned Dropbear server against the Q2's stock glibc.
+
+  q2/ssh/build.py --toolchain-repo Q2_TOOLCHAIN_CHECKOUT
+
+start.o comes from q2/toolchain/start.c of a q2-toolchain checkout. The
+stock firmware's glibc sysroot is build/sysroot.
+"""
+import argparse
 import hashlib
 import os
 from pathlib import Path
@@ -13,6 +20,12 @@ SHA256 = 'e098034a843699200c8c977a991fff73159735bf795d5f72ef672c41a6b1ae81'
 BUILD = ROOT / 'build/ssh'
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--toolchain-repo', type=Path, required=True)
+    args = parser.parse_args()
+    start = args.toolchain_repo.resolve() / 'q2/toolchain/start.c'
+    if not start.is_file():
+        parser.error(f'{args.toolchain_repo}: not a q2-toolchain checkout')
     BUILD.mkdir(parents=True, exist_ok=True)
     archive = BUILD / f'dropbear-{VERSION}.tar.bz2'
     if not archive.exists():
@@ -44,7 +57,7 @@ def main():
     env = os.environ.copy()
     env.update(Q2_SYSROOT=str(ROOT / 'build/sysroot'), Q2_LLD_DIR=str(llvm / 'gcc-ld'), Q2_START=str(BUILD / 'start.o'))
     subprocess.run(['clang', '--target=mipsel-linux-gnu', '-march=mips32r2', '-mfp64', '-mnan=2008', '-mabicalls', '-fno-pic', '-c',
-                    str(ROOT / 'q2/toolchain/start.c'), '-o', env['Q2_START']], check=True)
+                    str(start), '-o', env['Q2_START']], check=True)
     env.update(CC=str(ROOT / 'q2/ssh/cc'), AR=str(llvm / 'llvm-ar'), RANLIB=str(llvm / 'llvm-ar') + ' s',
                CFLAGS='-Os -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64')
     subprocess.run(['./configure', '--host=mipsel-linux-gnu', '--disable-zlib', '--disable-harden', '--disable-shadow',

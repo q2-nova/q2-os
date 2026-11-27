@@ -31,7 +31,7 @@ class WatchdogRunner(unittest.TestCase):
                     boots+=1;output=b'new\n' if recovered and boots>1 else b'old\n'
                 elif cmd.startswith('sha256sum '):output=('\n'.join(hashes)+'\n').encode()
                 return subprocess.CompletedProcess(args,0,output,b'')
-            argv=['probe','--out',str(path/'out'),'--binary',str(binary)]+(['--expire'] if expire else [])
+            argv=['probe','--host','q2.invalid','--keys',str(path/'keys'),'--out',str(path/'out'),'--binary',str(binary)]+(['--expire'] if expire else [])
             error=None
             with patch.object(sys,'argv',argv),patch.object(m.subprocess,'run',side_effect=remote),patch.object(m.time,'sleep'),patch.object(m.time,'monotonic',side_effect=[0,1] if recovered else [0,200]),patch.object(m,'wait_ready',return_value='PLAYER_READY\nclosed\n'),contextlib.redirect_stdout(io.StringIO()):
                 try:m.main()

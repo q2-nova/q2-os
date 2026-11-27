@@ -22,16 +22,19 @@ env = {
     'input_files': {},
 }
 # Deliberately enumerate repository source files, never ignored runtime/config data.
-tracked = capture(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', 'Cargo.toml', 'Cargo.lock', 'crates', 'q2/toolchain', 'q2/recovery', 'q2/card/launcher.sh']).split('\0')
+tracked = capture(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z', 'q2/recovery']).split('\0')
 files = [ROOT / name for name in tracked if name]
 files += [p for p in (ROOT / 'os').rglob('*') if p.is_file() and '__pycache__' not in p.parts]
 for path in sorted(files): env['input_files'][str(path.relative_to(ROOT))] = sha(path)
 packages = {}
-for manifest in ['Cargo.toml', 'os/probes/rust/Cargo.toml']:
-    metadata = json.loads(capture(['cargo', 'metadata', '--locked', '--offline', '--format-version=1', '--manifest-path', manifest]))
-    for p in metadata['packages']:
-        packages[p['id']] = {key: p[key] for key in ['name', 'version', 'license', 'source']}
+metadata = json.loads(capture(['cargo', 'metadata', '--locked', '--offline', '--format-version=1',
+                               '--manifest-path', 'os/probes/rust/Cargo.toml']))
+for p in metadata['packages']:
+    packages[p['id']] = {key: p[key] for key in ['name', 'version', 'license', 'source']}
 env['cargo_packages'] = sorted(packages.values(), key=lambda p: (p['name'], p['version']))
+# os/rust-build.py writes the Rust target from the q2-toolchain checkout's spec.
+target_spec = WORK / 'mipsel-q2-os-linux-gnu.json'
+env['rust_target_spec_sha256'] = sha(target_spec) if target_spec.exists() else None
 env['artifacts'] = {str(path.relative_to(WORK)): sha(path) for path in [
     out / 'images/q2-sd.img', out / 'images/rootfs.squashfs', out / 'images/rootfs.cpio.gz',
     WORK / 'kernel-disk/uImage.gz', WORK / 'kernel-initramfs/uImage.gz',

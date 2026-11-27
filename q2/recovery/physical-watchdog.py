@@ -9,9 +9,8 @@ an expiry automatically. Kernel replacement and hang recovery remain separate.
 import argparse, hashlib, json, subprocess, sys, time, uuid
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT/'tests/power'))
-from run import ssh, KEYS
-from restore import wait_ready
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from device_ssh import ssh, wait_ready  # noqa: E402
 
 MODULE = 'cebe7c8c0866a82531fcd918a018fdf95809a787fb6904ce8445286f0d64d0c0'
 PREFLIGHT = '''set -eu
@@ -32,11 +31,12 @@ cat /sys/class/power_supply/battery/status /sys/class/power_supply/battery/capac
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--host',required=True)
+    p.add_argument('--keys',type=Path,default=ROOT/'build/ssh/device',help="the player's client_ed25519 and known_hosts (q2/ssh/provision.py)")
     p.add_argument('--expire',action='store_true')
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--binary',type=Path,default=ROOT/'build/recovery/watchdog-probe')
     a=p.parse_args();a.out.mkdir(parents=True,exist_ok=False)
-    conn=ssh(a.host,KEYS);base='/run/q2-watchdog-'+uuid.uuid4().hex[:12]
+    conn=ssh(a.host,a.keys);base='/run/q2-watchdog-'+uuid.uuid4().hex[:12]
     result={'passed':False,'physical_hardware':True,'expiry_requested':a.expire,
             'replacement_kernel':False,'persistent_boot_selection':False,'base':base}
     def remote(cmd,check=True,**kw):

@@ -8,12 +8,12 @@ import tempfile
 import time
 import unittest
 
-LAUNCHER = Path(__file__).resolve().parents[1] / 'card/launcher.sh'
+LAUNCHER = Path(__file__).resolve().with_name('launcher.sh')
 GOOD = b'#!/bin/sh\necho $$ > "$Q2ND_RUNTIME/ready"\ntrap "exit 0" TERM\nwhile :; do sleep 1; done\n'
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
-        build = LAUNCHER.parents[2] / 'build/power/host-tests'
+        build = LAUNCHER.parents[1] / 'build/launcher-tests'
         build.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix='q2-launcher-', dir=build)
         self.root = Path(self.temp.name)
@@ -43,7 +43,7 @@ class LauncherTests(unittest.TestCase):
             time.sleep(.1)
         self.fail((self.root / 'log').read_text())
     def request_restart(self):
-        # As deploy.py does: touch restart, then USR1 if the launcher asks for it.
+        # As q2-app-update does: touch restart, then USR1 if the launcher asks for it.
         (self.run / 'restart').touch()
         if (self.run / 'launcher.wake').exists():
             os.kill(int((self.run / 'launcher.pid').read_text()), signal.SIGUSR1)

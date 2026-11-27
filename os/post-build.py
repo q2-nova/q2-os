@@ -18,10 +18,7 @@ validate_timezone_data(target)
 (target / 'etc/init.d/S01seedrng').unlink(missing_ok=True)
 artifacts = target.parent / 'artifacts'
 player = target / 'usr/bin/q2nd'
-launcher_source = artifacts / 'q2-launcher'
 has_player = (artifacts / 'q2nd').is_file() or player.is_file()
-if has_player and not launcher_source.is_file():
-    raise SystemExit('stage a matching q2-launcher alongside the q2nd artifact')
 for name in ['q2nd', 'q2-rust-probe']:
     source = artifacts / name
     if source.exists():
@@ -32,7 +29,7 @@ dest.mkdir(exist_ok=True)
 launcher = dest / 'q2-launcher'
 launcher.unlink(missing_ok=True)
 if has_player:
-    shutil.copyfile(launcher_source, launcher)
+    shutil.copyfile(root / 'os/launcher.sh', launcher)
     launcher.chmod(0o755)
 for name, link in [('etc/dropbear', '/state/ssh'), ('root/.ssh', '/state/ssh/client')]:
     p = target / name
