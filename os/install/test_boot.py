@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
 import shutil
@@ -29,6 +30,12 @@ def require_admitted_telemetry(console, required):
 # Worktree experiments share the repository's ignored generated fixture store.
 ROOT = Path(subprocess.check_output(['git', '-C', SOURCE_ROOT, 'rev-parse',
     '--path-format=absolute', '--git-common-dir'], text=True).strip()).parent
+def owned_fixture_path(path):
+    path = path.resolve()
+    return (path.is_relative_to(ROOT/'build') or
+            (SOURCE_ROOT.is_relative_to(ROOT) and path.is_relative_to(SOURCE_ROOT/'build')))
+
+
 PAGE, STRIDE, ERASE = 2048, 2112, 131072
 
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -325,7 +332,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--base-nand', type=Path, required=True)
     p.add_argument('--candidate', type=Path, required=True)
+    p.add_argument('--output-root', type=Path, default=ROOT/'build/os/install-review',
+                   help='existing canonical build directory for disposable NAND, SD and receipts')
     p.add_argument('--qemu', type=Path, required=True)
+    p.add_argument('--out', type=Path, help='fresh generated receipt directory, with its QEMU control socket')
     p.add_argument('--nand-ds35q1ga-ecc-read-us', type=int, choices=range(25, 71), metavar='25..70',
                    help='opt-in effective ECC-on fixture delay in microseconds; requires DS35Q1GA and modeled energy')
     p.add_argument('--bad-blocks', default='', help='comma-separated rootfs-relative eraseblocks')
@@ -420,7 +430,7 @@ def main():
     if a.warm_reboot_between_phases and (len(guest_paths)<2 or a.boots!=1 or not a.require_player):p.error('warm transitions require2–3 phases, one cold boot and player health')
     if a.require_single_boot and a.warm_reboot_between_phases:
         p.error('single-boot admission cannot include requested warm resets')
-    if guest_paths and (not a.key or any(not path.resolve().is_relative_to(ROOT/'build') for path in guest_paths)):
+    if guest_paths and (not a.key or any(not owned_fixture_path(path) for path in guest_paths)):
         p.error('guest script requires generated guest SSH and a build/ path')
     if a.require_loopback and (not a.key or a.corrupt_root): p.error('loopback check requires installed-root SSH')
     playback_card = a.generated_playback_card or a.generated_playback_flac_card
@@ -431,14 +441,14 @@ def main():
     if a.debug_sd_requests and not (playback_card or a.generated_direct_read_card):
         p.error('SD request tracing requires a generated card')
     if a.require_player and (not a.userdata_image or a.corrupt_root): p.error('player test requires generated userdata and a valid root')
-    if a.userdata_image and (not a.key or not a.userdata_image.resolve().is_relative_to(ROOT/'build')):
+    if a.userdata_image and (not a.key or not owned_fixture_path(a.userdata_image)):
         p.error('generated userdata fixture requires SSH checks and a build/ path')
     telemetry_admission=generated_userdata.admit(a.userdata_image,a.candidate) if a.userdata_image and not a.corrupt_root else None
     # Freeze exactly the bytes that will be sent after boot; an edited fixture
     # cannot silently diverge from the script SHA recorded in this receipt.
     guest_scripts = [path.read_bytes() for path in guest_paths]
     for path in (a.base_nand, a.candidate, a.qemu):
-        if not path.resolve().is_relative_to(ROOT / 'build'): p.error('fixtures must be under build/')
+        if not owned_fixture_path(path): p.error('fixtures must be under build/')
     if a.base_nand.stat().st_size != 131072 * STRIDE: p.error('not full-chip data+OOB NAND')
     with a.base_nand.open('rb') as f:
         for start, end in ((0x6400000, 0x6440000), (0x6440000, 0x7d00000)):
@@ -446,8 +456,22 @@ def main():
             if any(x != 255 for x in f.read(raw(end-start))): p.error('identity/selector/userdata must be erased')
     bad = sorted(set(int(x) for x in a.bad_blocks.split(',') if x))
     if any(x < 0 or x >= 600 for x in bad): p.error('bad block index outside rootfs')
+    output_root = a.output_root.absolute()
+    if output_root != output_root.resolve() or not output_root.is_relative_to(ROOT/'build'):
+        p.error('use a canonical output root under build/')
+    if a.output_root != p.get_default('output_root'):
+        if not output_root.is_dir() or output_root.stat().st_uid != os.geteuid():
+            p.error('explicit output root must already exist and be owned by the caller')
     tag = 'install-boot-' + uuid.uuid4().hex[:8]
-    out = ROOT / 'build/os/install-review' / tag; out.mkdir(parents=True)
+    if a.out is not None:
+        if a.output_root != p.get_default('output_root'):
+            p.error('--out and --output-root are mutually exclusive')
+        out = a.out.absolute()
+        if out != out.resolve() or not owned_fixture_path(out):
+            p.error('use a canonical output path under build/')
+    else:
+        out = output_root / tag
+    out.mkdir(parents=True, exist_ok=False)
     card_image = None
     if playback_card or a.generated_direct_read_card:
         spec = importlib.util.spec_from_file_location(
