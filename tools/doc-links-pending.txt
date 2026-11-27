@@ -1,13 +1,6 @@
 # Links to documents and patches that are not in this repository yet.
 # Format: SOURCE TARGET. tools/check_docs.py allows these and fails once a
 # target exists or the link is gone, so remove the line when it is fixed.
-docs/bluetooth.md bugs/wifi-lps-after-power-cycle.md
-docs/bluetooth.md ../kernel/patches/0181-MIPS-Q2-mux-UART0-for-Bluetooth-and-add-a-Bluetooth-enable-hold.patch
-docs/bluetooth.md ../kernel/patches/0191-serial-8250_ingenic-UMR-oversampling-for-rates-above-uartclk-16.patch
-docs/bluetooth.md ../kernel/patches/0192-serial-8250_ingenic-write-UMR-and-UACR-after-DLAB-clears-as-the-stock-kernel-does.patch
-docs/bluetooth.md ../projects/bluetooth/STATUS.md
-docs/bluetooth.md specification.md
-docs/bluetooth.md telemetry.md
 docs/os-image-build.md os-appliance-integration.md
 docs/os-image-build.md os-audio.md
 docs/os-image-build.md os-image-validation.md

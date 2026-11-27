@@ -208,13 +208,14 @@ page.
 | Quiescent playback power 26.07 mW per codec (VA = VCP = VD = VL = 1.8 V, VP = 3.6 V, 32 Ω). Idle noise 0.55 µV at every full scale. Click at a PDN_HP change ±50 µV typical. No ADC, level meter or loopback; HP_LOAD measures load impedance | DS1155F2 Table 3-19 | datasheet |
 | The board has no headphone-detect line to the codecs | stock device tree | stock firmware |
 
-Player settings that map onto these registers are documented in q2-player.
+The player's Headphone Power levels map onto these registers as described in
+q2-player [docs/audio.md](https://github.com/q2-nova/q2-player/blob/main/docs/audio.md).
 
 ## Wi-Fi and Bluetooth
 
 The combo chip is a Realtek RTL8733BS (8723F family). Driver details are in
-[kernel/rtl8733bs](../kernel/rtl8733bs/README.md); the Bluetooth stack is in
-[bluetooth.md](bluetooth.md).
+[kernel/rtl8733bs](../kernel/rtl8733bs/README.md); the Bluetooth attachment and
+its kernel support are in [bluetooth.md](bluetooth.md).
 
 | Fact | Source | Level |
 | --- | --- | --- |

@@ -75,8 +75,8 @@ found. Its `fw_version` (`0xd5d73187`) is above ours (`0xd5c81143`) and above
 CoreELEC's 2025 file (`0xd5c81140`), so the three look like one build series;
 whether `fw_version` orders releases is unverified. No changelog exists. The
 chip ID 1 patch is identical to ours, so the files differ only for a chip that
-reports ROM version 2. Which ROM version the Q2's controller reports is not
-yet known (device step 1 in [bluetooth.md](bluetooth.md) reads it).
+reports ROM version 2. The Q2's controller reports ROM version 2
+([bluetooth.md](bluetooth.md#hardware-path)), so a candidate changes its patch.
 
 ```sh
 python3 tools/fetch_firmware.py --candidate coreelec-2026-07-15
@@ -98,7 +98,8 @@ adds a `regulator_put` import; its `/firmware/rtlwifi` tables are unchanged.
 
 ## Testing a newer Bluetooth build on the Q2
 
-Only after the stock files work (device step 1 in [bluetooth.md](bluetooth.md)):
+The probe commands are in q2-player
+[docs/bluetooth.md](https://github.com/q2-nova/q2-player/blob/main/docs/bluetooth.md#probe-commands).
 
 1. Read the controller's ROM version with the stock files
    (`q2nd --bt-probe version --firmware /state/bluetooth/firmware`). If it is
@@ -112,10 +113,11 @@ Only after the stock files work (device step 1 in [bluetooth.md](bluetooth.md)):
    RAM at every bring-up and is lost when BT_DIS_N drops, so turning Bluetooth
    off or rebooting undoes it; nothing on the Q2's flash changes.
 4. The candidate config's UART rate code is `0x04928002` (1.5 M in Linux
-   `btrtl`'s table) where the stock one is `0x04928001` (3 M). 1.5 M is the
-   rate our host uses. Pair the candidate patch with the stock config first,
+   `btrtl`'s table) where the stock one is `0x04928001` (3 M). The host
+   rewrites the configuration's UART entry to the rate it runs (3 M with
+   RTS/CTS first). Pair the candidate patch with the stock config first,
    so only one thing changes, then try the candidate config.
-5. If version, scan, pair and a stream (steps 1 to 4 of the device plan)
-   pass with the candidate, compare stream dropouts and reconnects against
-   the stock files over the same listening run before proposing a change.
-   The shipped files stay as they are until the device owner decides.
+5. If version, scan, pair and a stream pass with the candidate, compare
+   stream dropouts and reconnects against the stock files over the same
+   listening run before proposing a change. The shipped files stay as they
+   are until the change is approved.
