@@ -47,7 +47,7 @@ Packages (default: all):
              q2_display_begin on generated frames into buffers of 4 pitches,
              byte for byte against a model; error, page-flip, evdev and
              clicker paths through pipes. The Q2 timing is
-             tests/perf/x2000_cost/device.py platform.
+             q2-factory gates/perf/x2000_cost_device.py platform.
 
 --arms adds clang arms that separate causes in a Q2 A/B of busybox:
 `clang` (clang without any X2000 change) and `gensched` (X2000 costs and
@@ -61,7 +61,7 @@ file. The dropbear and wpa gcc arms reproduce the shipped files byte for byte
 (V0.129: usr/sbin/dropbear ec8c591b, usr/sbin/wpa_supplicant a11ac701,
 usr/sbin/wpa_cli 6684a4ae). The wpa package needs podman and the
 q2-os-build image, as os/hardware/build-wifi-tools.py does. The Q2 comparison of busybox is
-tests/perf/x2000_cost/device.py applets.
+q2-factory gates/perf/x2000_cost_device.py applets.
 
 Hardening: first, the flags the SDK's GCC wrapper adds (stack protector,
 RELRO and BIND_NOW, PIE, reproducibility) are compared with what
@@ -681,7 +681,7 @@ def dropbear(c):
     (home / '.ssh/authorized_keys').chmod(0o600)
     (home / '.ssh').chmod(0o700)
     home.chmod(0o700)
-    # The layout of tests/perf/x2000_cost/device.py: authorized_keys in a
+    # The layout of q2-factory gates/perf/x2000_cost_device.py: authorized_keys in a
     # directory outside the home given with -D. dropbear checks every
     # directory up to / then, so none may be group- or world-writable (under
     # /tmp the key is refused: the empty echo of q2-dropbear-01).
@@ -1205,7 +1205,7 @@ def platform(c):
     frames into buffers of 4 pitches (8 cases, compared with
     platform_rotation byte for byte), the error, page-flip, evdev and
     clicker paths through pipes (PLATFORM_API), and its bench mode, which
-    tests/perf/x2000_cost/device.py platform times on the Q2."""
+    q2-factory gates/perf/x2000_cost_device.py platform times on the Q2."""
     builder = load_module('build_platform_library', ROOT / 'tests/perf/build_platform_library.py')
     symbols = load_module('elf_symbols', ROOT / 'tools/elf_symbols.py')
     out = c.out / 'platform'
