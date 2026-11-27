@@ -41,7 +41,8 @@ Recorded in `cca2dd5d2` (2026-10-31).
 python3 os/build.py container
 python3 os/build.py configure
 python3 os/build.py build
-python3 os/rust-build.py
+python3 os/rust-build.py --toolchain-repo Q2_TOOLCHAIN_CHECKOUT \
+  --compiler-work X2000_COMPILER_WORK --player PAIRED_PLAYER_BUILD
 # Stage the approved matching launcher as build/os/out/artifacts/q2-launcher.
 python3 os/build.py build
 python3 os/image.py
@@ -57,6 +58,15 @@ python3 os/build.py sdk
 python3 os/test_sdk.py
 python3 os/manifest.py
 ```
+
+`os/rust-build.py` builds the Rust ABI probe `q2-rust-probe` from
+`os/probes/rust` with the generated SDK and the X2000 compiler of a
+q2-toolchain checkout (`Q2_X2000=0` uses the stock nightly instead), and
+copies `q2nd` from a q2-player paired build (the output directory of its
+`tools/build-target.py`) after checking it against that build's
+`result.json`. Both land in `build/os/out/artifacts/`, which the second
+Buildroot pass installs into the image. Without `--player` the image has
+no player.
 
 The kernel and QEMU builds use the container ID in the source lock. Restore the
 qualified image from its OCI archive or see the QEMU fork's
@@ -187,15 +197,17 @@ same verified source-download cache:
 ```sh
 python3 os/build.py --output repeat configure
 python3 os/build.py --output repeat build
-python3 os/rust-build.py --output repeat
+python3 os/rust-build.py --output repeat --toolchain-repo Q2_TOOLCHAIN_CHECKOUT \
+  --compiler-work X2000_COMPILER_WORK --player PAIRED_PLAYER_BUILD
 python3 os/build.py --output repeat build
 python3 os/image.py --output repeat
 python3 os/audit.py --output repeat
 python3 os/compare.py
 ```
 
-`compare.py` compares the player, Rust probe, squashfs, compressed initramfs,
-diagnostic ext4 root, pristine state and complete SD image. The SDK tarball is
+`compare.py` compares the Rust probe, squashfs, compressed initramfs,
+diagnostic ext4 root, pristine state and complete SD image. Both trees
+stage the same paired player, so it is not compared. The SDK tarball is
 a separate development artifact: its host paths and archive metadata are not
 covered by the byte-reproducibility claim. Run `relocate-sdk.sh` after extracting
 it. C SDK consumers must use `-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64`, as the

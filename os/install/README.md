@@ -38,13 +38,20 @@ python3 os/install/build.py \
   --output build/os/install-candidate
 ```
 
-`--app` accepts a paired target build from `os/rust-build.py` or
-`tests/perf/build-mainline-app.sh`. Keep the neighboring `q2-portal` binary and
+`--app` takes `q2nd` from a q2-player paired build, the output directory
+of q2-player `tools/build-target.py`. Keep the neighboring `q2-portal` binary and
 both symbol receipts in their original layout. The installer binds the player
 to the companion from the same source commit and installs the companion in
 `usr/libexec/q2-network/`. Generate the full `--wifi-tools` output with
 `os/hardware/build-wifi-tools.py` for the matching SDK, including the private
 access-point files needed by phone entry.
+
+When the paired build holds `startup-read-ahead/profile.json`, written by
+q2-player `tools/startup-profile.py`, the builder checks it against the
+installed `q2nd`, records the 128 KiB block ranges in `artifact.json` under
+`startup_read_ahead`, and root init reads those ranges of the player ahead.
+The builder refuses a profile of another executable. Without the file, root
+init reads the whole player.
 
 The default `--tailscale rs` packages the standalone Rust daemon at
 `usr/libexec/q2-network/tsrsd`. The standalone repository and its exact source

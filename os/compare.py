@@ -3,7 +3,7 @@
 import json
 from build import WORK, sha
 
-names = ['artifacts/q2nd', 'artifacts/q2-rust-probe',
+names = ['artifacts/q2-rust-probe',
          'images/rootfs.squashfs', 'images/rootfs.cpio.gz',
          'images/rootfs.ext4', 'images/q2-sd-state.ext4', 'images/q2-sd.img']
 report = {'passed': True, 'outputs': ['out', 'repeat'], 'artifacts': {}}

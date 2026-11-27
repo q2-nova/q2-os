@@ -1,86 +1,114 @@
 #!/usr/bin/env python3
-"""Build custom Rust std, ABI probe and player with the generated GNU SDK."""
+r"""Build the Rust ABI probe and stage the player for the source-built emulator image.
+
+  python3 os/rust-build.py --toolchain-repo Q2_TOOLCHAIN_CHECKOUT \
+    [--compiler-work X2000_COMPILER_WORK] [--player PAIRED_PLAYER_BUILD] [--output NAME]
+
+Builds q2-rust-probe (os/probes/rust) with the generated SDK in
+build/os/NAME/host and the X2000 compiler of a q2-toolchain checkout
+(Q2_X2000=0: the stock nightly), into build/os/NAME/artifacts/. With
+--player, copies q2nd from a q2-player paired build (its
+tools/build-target.py output) there too, after checking it against that
+build's result.json. os/post-build.py installs both into the image.
+"""
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
-import sys
 from build import ROOT, WORK, LOCK, run, sha
-sys.path.insert(0, str(ROOT / 'tools'))
-import x2000_toolchain
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--output', default='out')
-args = parser.parse_args()
-if not args.output.replace('-', '').replace('_', '').isalnum(): parser.error('invalid output name')
-out = WORK / args.output
-startup_profile = out / 'artifacts/startup-read-ahead'
-if startup_profile.exists() or startup_profile.is_symlink():
-    raise SystemExit('preserving existing startup read-ahead profile; use a fresh --output')
-for name in ('q2nd', 'q2-portal', 'q2-rust-probe'):
-    if ((out / 'artifacts' / name).exists() or (out / 'artifacts' / (name + '.size.json')).exists()
-            or (out / 'symbols' / name).exists()):
-        raise SystemExit('preserving existing artifact/symbols; use a fresh --output')
-sdk = out / 'host'
-if not (sdk / 'mipsel-buildroot-linux-gnu/sysroot/usr/lib/libq2probe.so').exists():
-    raise SystemExit('finish the Buildroot build, including q2-probes, first')
-cc = sdk / 'bin/mipsel-buildroot-linux-gnu-gcc'
-if not cc.exists(): raise SystemExit('build the Buildroot SDK first')
-target = WORK / 'mipsel-q2-os-linux-gnu.json'
-spec = json.loads((ROOT / 'q2/toolchain/mipsel-q2-linux-gnu.json').read_text())
-# The X2000 toolchain (tools/x2000_toolchain.py, docs/x2000-toolchain.md);
-# Q2_X2000=0 builds with the stock nightly and target specification.
-x2000 = x2000_toolchain.enabled()
-if x2000:
-    spec = x2000_toolchain.spec(spec)
-target.write_text(json.dumps(spec, indent=2) + '\n')
-env = os.environ.copy()
-env.update({
-    'Q2_OS_CC': str(cc),
-    'CC_mipsel_q2_os_linux_gnu': str(cc),
-    'AR_mipsel_q2_os_linux_gnu': str(sdk / 'bin/mipsel-buildroot-linux-gnu-ar'),
-    'CARGO_TARGET_MIPSEL_Q2_OS_LINUX_GNU_LINKER': str(ROOT / 'os/rust-link.py'),
-    'CARGO_TARGET_DIR': str(WORK / (('rust-target' if args.output == 'out' else 'rust-target-' + args.output)
-                                    + ('-x2000' if x2000 else ''))),
-    'CARGO_BUILD_JOBS': '8',
-    'SOURCE_DATE_EPOCH': str(LOCK['source_date_epoch']),
-    'RUSTFLAGS': '--remap-path-prefix=' + str(ROOT) + '=/q2-source',
-    'CARGO_PROFILE_RELEASE_DEBUG': 'line-tables-only',
-    'CARGO_PROFILE_RELEASE_STRIP': 'none',
-})
-if x2000:
-    env.update(x2000_toolchain.cargo_env(sdk=sdk))
-# std's default build-std features with backtrace-trace-only: panic
-# backtraces (RUST_BACKTRACE) print raw PCs, resolved off the device from the
-# unstripped companion, and std links no symbolizer (gimli, addr2line).
-base = ['cargo', '+' + LOCK['rust_toolchain'], 'build', '--release', '--offline',
-        '-Zbuild-std=std,panic_abort', '-Zbuild-std-features=panic-unwind,backtrace,backtrace-trace-only', '-Zjson-target-spec', '--target', target]
-run(['python3', ROOT / 'tools/build_stall_unwind.py', '--target', 'q2',
-     '--sdk', sdk, '--out', out / 'diagnostic-unwinder'], env=env)
-env['Q2_UNWIND_PREFIX'] = str(out / 'diagnostic-unwinder/install')
-# Profile-guided optimization of the player (the device owner, 2026-11-17): profile this
-# source in the emulator with this SDK (tools/app_pgo.py), then build with it.
-pgo = out / 'pgo'
-if pgo.exists(): shutil.rmtree(pgo)
-run(['python3', ROOT / 'tools/app_pgo.py', 'profile', '--out', pgo, '--sdk', sdk], env=env)
-player_env = {**env, 'RUSTFLAGS': env['RUSTFLAGS'] + ' -Cprofile-use=' + str(pgo / 'q2nd.profdata')}
-run(base + ['--locked', '-p', 'q2nd', '--no-default-features'], env=player_env)
-run(base + ['--locked', '-p', 'q2-portal'], env=env)
-run(base + ['--locked', '--manifest-path', ROOT / 'os/probes/rust/Cargo.toml'], env=env)
-dest = out / 'artifacts'
-dest.mkdir(exist_ok=True)
-for name in ['q2nd', 'q2-portal', 'q2-rust-probe']:
-    source = Path(env['CARGO_TARGET_DIR']) / 'mipsel-q2-os-linux-gnu/release' / name
-    run(['python3', ROOT / 'tools/elf_symbols.py', '--source', source,
-         '--deployed', dest / name, '--symbols', out / 'symbols' / name,
-         '--prefix', str(sdk / 'bin/mipsel-buildroot-linux-gnu-'),
-         '--toolchain', LOCK['rust_toolchain'], '--source-commit',
-         subprocess.check_output(['git', '-C', ROOT, 'rev-parse', 'HEAD'], text=True).strip()], env=env)
-    print(name, sha(dest / name))
-    run(['python3', ROOT / 'tools/elf_size.py', '--binary', dest / name,
-         '--readelf', sdk / 'bin/mipsel-buildroot-linux-gnu-readelf',
-         '--out', dest / (name + '.size.json')])
-run(['python3', ROOT / 'tools/app_startup_profile.py', '--player', dest / 'q2nd',
-     '--sdk', sdk, '--out', startup_profile], env=env)
+TARGET = 'mipsel-q2-os-linux-gnu'
+PROBE = 'q2-rust-probe'
+
+
+def toolchain(repo, compiler_work):
+    """The checkout's x2000_toolchain module, with Q2_X2000_WORK set for it."""
+    path = repo / 'tools/x2000_toolchain.py'
+    if not path.is_file():
+        raise SystemExit(f'{path}: not a q2-toolchain checkout')
+    if compiler_work is not None:
+        os.environ['Q2_X2000_WORK'] = str(compiler_work.resolve())
+    spec = importlib.util.spec_from_file_location('x2000_toolchain', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def paired_player(build):
+    """q2nd of a q2-player paired build, checked against its result.json."""
+    player = build / 'q2nd'
+    try:
+        result = json.loads((build / 'result.json').read_text())
+        if (result.get('passed') is not True or result.get('target') != TARGET
+                or result.get('artifacts', {}).get('q2nd', {}).get('sha256') != sha(player)):
+            raise ValueError
+    except (OSError, ValueError, AttributeError):
+        raise SystemExit(f'{build}: not a passed q2-player paired build whose q2nd matches result.json') from None
+    return player
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--output', default='out')
+    parser.add_argument('--toolchain-repo', type=Path, required=True)
+    parser.add_argument('--compiler-work', type=Path, help='built X2000 compiler; not needed with Q2_X2000=0')
+    parser.add_argument('--player', type=Path, help='q2-player tools/build-target.py output directory')
+    args = parser.parse_args()
+    if not args.output.replace('-', '').replace('_', '').isalnum():
+        parser.error('invalid output name')
+    out = WORK / args.output
+    dest = out / 'artifacts'
+    for name in (PROBE, 'q2nd'):
+        if (dest / name).exists():
+            parser.error(f'preserving existing {dest / name}; use a fresh --output')
+    player = paired_player(args.player.resolve()) if args.player else None
+    sdk = out / 'host'
+    if not (sdk / 'mipsel-buildroot-linux-gnu/sysroot/usr/lib/libq2probe.so').exists():
+        parser.error('finish the Buildroot build, including q2-probes, first')
+    cc = sdk / 'bin/mipsel-buildroot-linux-gnu-gcc'
+    repo = args.toolchain_repo.resolve()
+    x2000 = toolchain(repo, args.compiler_work)
+    spec = json.loads((repo / 'q2/toolchain/mipsel-q2-linux-gnu.json').read_text())
+    if x2000.enabled():
+        if args.compiler_work is None:
+            parser.error('--compiler-work is required unless Q2_X2000=0')
+        receipt = json.loads(x2000.receipt_path(x2000.work_dir()).read_text())
+        if receipt['pin']['rust_toolchain'] != LOCK['rust_toolchain']:
+            parser.error('the X2000 compiler and os/sources.json name different Rust toolchains')
+        spec = x2000.spec(spec)
+    target = WORK / (TARGET + '.json')
+    target.write_text(json.dumps(spec, indent=2) + '\n')
+    env = os.environ.copy()
+    for name in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'):
+        env.pop(name, None)
+    env.update({
+        'Q2_OS_CC': str(cc),
+        'CC_mipsel_q2_os_linux_gnu': str(cc),
+        'AR_mipsel_q2_os_linux_gnu': str(sdk / 'bin/mipsel-buildroot-linux-gnu-ar'),
+        'CARGO_TARGET_MIPSEL_Q2_OS_LINUX_GNU_LINKER': str(ROOT / 'os/rust-link.py'),
+        'CARGO_TARGET_DIR': str(WORK / ('rust-target-' + args.output + ('-x2000' if x2000.enabled() else ''))),
+        'CARGO_BUILD_JOBS': '2',
+        'SOURCE_DATE_EPOCH': str(LOCK['source_date_epoch']),
+        'RUSTFLAGS': '--remap-path-prefix=' + str(ROOT) + '=/q2-source',
+        'CARGO_PROFILE_RELEASE_STRIP': 'symbols',
+    })
+    if x2000.enabled():
+        env.update(x2000.cargo_env(sdk=sdk))
+    run(['cargo', '+' + LOCK['rust_toolchain'], 'build', '--release', '--offline', '--locked',
+         '-Zbuild-std=std,panic_abort', '-Zbuild-std-features=panic-unwind,backtrace,backtrace-trace-only',
+         '-Zjson-target-spec',
+         '--target', target, '--manifest-path', ROOT / 'os/probes/rust/Cargo.toml'], env=env)
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(env['CARGO_TARGET_DIR']) / TARGET / 'release' / PROBE, dest / PROBE)
+    (dest / PROBE).chmod(0o755)
+    print(PROBE, sha(dest / PROBE))
+    if player is not None:
+        shutil.copyfile(player, dest / 'q2nd')
+        (dest / 'q2nd').chmod(0o755)
+        print('q2nd', sha(dest / 'q2nd'))
+
+
+if __name__ == '__main__':
+    main()

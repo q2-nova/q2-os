@@ -21,6 +21,7 @@ jobs:
         run: |
           python3 -m compileall -q os
           python3 os/build.py --help
+          python3 os/rust-build.py --help
           python3 os/install/prepare.py --help
           python3 os/install/build.py --help
           for script in os/hardware/player-bringup os/install/bootstrap os/install/diagnostic-ssh os/install/qemu-ready os/install/root-init os/install/state; do
