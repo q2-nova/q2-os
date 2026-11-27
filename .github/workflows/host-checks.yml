@@ -46,6 +46,9 @@ jobs:
           nm -D --defined-only build/ci/libq2platform.so >build/ci/platform-symbols.txt
           grep -E ' T q2_touchscreen_open$' build/ci/platform-symbols.txt
           grep -E ' T q2_touchscreen_state$' build/ci/platform-symbols.txt
+          gcc -Wall -Wextra -Werror -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 \
+            -o build/ci/test-headphones os/platform/test_headphones.c
+          build/ci/test-headphones
           gcc -O2 -D_FORTIFY_SOURCE=1 -Wall -Wextra -Werror -o build/ci/q2-usb-auto-events os/platform/usb-auto-events.c
           rc=0
           build/ci/q2-usb-auto-events --invalid-test-argument || rc=$?
