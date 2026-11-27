@@ -92,8 +92,7 @@ close_lun() { printf '\n' > "$lun/file"; }
 # mount is the partition. The kernel drops each cache when its last opener
 # closes, but a release the helper cannot see (the mass-storage thread's
 # deferred close after a host eject) can leave one populated. Write back and
-# drop both before either side reads the card again
-# (docs/bugs/exfat-migration-readonly-2026-11-18.md).
+# drop both before either side reads the card again.
 have_blockdev() { command -v blockdev >/dev/null 2>&1; }
 flush_card_caches() {
     if ! have_blockdev; then bootmark usb-flushbufs-unavailable; return 0; fi

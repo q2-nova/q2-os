@@ -12,7 +12,7 @@ ZRAM_LIMIT=12M
 ZRAM_ALGORITHM=lzo-rle
 # 0: no MGLRU working-set floor. At 1000, kswapd asked the OOM killer (order 0,
 # GFP_KERNEL) under heavy streaming reads with about 80 MB available, three
-# kills in two minutes on V0.125 (docs/bugs/thrash-watchdog-reset.md).
+# kills in two minutes on V0.125 (q2-factory projects/kernel/STATUS.md, KRN-001).
 MIN_TTL_MS=0
 zram_start() {
     z=/sys/block/zram0
@@ -28,7 +28,7 @@ zram_start() {
 }
 # tmpfs pages are not file cache: bound /run and /tmp (a mount without size=
 # may take half of RAM; 32 MB of tmpfs stopped the Q2,
-# docs/bugs/thrash-watchdog-reset.md). A release keeps the base's recovery
+# q2-factory projects/kernel/STATUS.md, KRN-001). A release keeps the base's recovery
 # initramfs, whose bootstrap makes these mounts, so the bound is applied here,
 # once per boot: a rig that raised /run for its session keeps its size across
 # player restarts.
@@ -39,7 +39,7 @@ tmpfs_bound() {
     : > /run/q2/tmpfs-bounded
     echo "Q2_TMPFS_BOUND run=$(df -k /run | awk 'NR==2{print $2}')k tmp=$(df -k /tmp | awk 'NR==2{print $2}')k"
 }
-# Scalar squashfs inflate (docs/bugs/thrash-watchdog-reset.md): with both
+# Scalar squashfs inflate (q2-factory projects/kernel/STATUS.md, KRN-001): with both
 # threads of the core running, the MSA inflate (kernel MSA sections of up
 # to milliseconds) stops the Q2 about once per 100 s of loop-on-card reads.
 # 2 and 0 are the variants the parameters document as the MSA ones'

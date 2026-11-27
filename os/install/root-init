@@ -111,7 +111,7 @@ if [ "$peripherals_ready" = 1 ] && [ "$(cat /run/q2/state-status 2>/dev/null)" =
     # 1 s (three boots); association still overlaps the player's start.
     nice -n 10 /usr/libexec/q2-network/wifi up > /run/log/wifi-early 2>&1 &
 fi
-# Power history (docs/bugs/q2-off-during-abba-02.md): the PMIC's power-on and
+# Power history (q2-factory projects/listening-reliability/STATUS.md, LR-013): the PMIC's power-on and
 # power-off sources (AXP2101 0x20/0x21) at each boot, beside q2-safe-poweroff's
 # own line, tell an orderly shutdown from a key or fault off. Last 64 lines.
 if [ "$peripherals_ready" = 1 ] && [ "$(cat /run/q2/state-status 2>/dev/null)" = ready ]; then

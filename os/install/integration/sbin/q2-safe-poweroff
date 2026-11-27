@@ -53,7 +53,7 @@ shutdown_installed() {
     [ ! -x "$USB_AUTO" ] || "$USB_AUTO" stop || fail 'automatic USB manager stop failed'
     # Freeze future ownership transitions before checking whether a host owns SD.
     validate_storage
-    # One line in the power history root-init keeps (docs/bugs/q2-off-during-abba-02.md):
+    # One line in the power history root-init keeps (q2-factory LR-013):
     # an orderly shutdown, and who asked for it. Never blocks the shutdown.
     if [ -n "$state" ]; then
         { tail -n 63 "$HISTORY" 2>/dev/null

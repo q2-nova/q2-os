@@ -188,7 +188,7 @@ run_service() {
     if [ -s /run/q2/usb-status.pid ]; then
         [ -x "$control" ] && "$control" stop || fail 'USB status display could not release ownership'
     fi
-    # Thrash guard before the supervisor and the player (docs/bugs/thrash-watchdog-reset.md);
+    # Thrash guard before the supervisor and the player (q2-factory projects/kernel/STATUS.md, KRN-001);
     # it stays running across player restarts and starts once per boot.
     [ ! -x "$MEMORY_GUARD" ] || "$MEMORY_GUARD" start || :
     "$SUPERVISOR" start || fail 'supervision unavailable'

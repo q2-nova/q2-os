@@ -1,7 +1,7 @@
 /* Mainline-only watchdog owner: real worker progress, authenticated by kernel
  * credentials. Pause/network waits pulse from the audio thread itself.
  *
- * Memory pressure must not stop the owner (docs/bugs/thrash-watchdog-reset.md):
+ * Memory pressure must not stop the owner (q2-factory projects/kernel/STATUS.md, KRN-001):
  * with file pages thrashing, an unlocked owner did not reach its keepalive
  * for 5 s while the kernel and the rest of user space ran, and the reset
  * left no record. The owner locks its pages, runs in a real-time class and

@@ -6,7 +6,7 @@
  * from NAND at about 100 major faults a second. On V0.122 and V0.123 the
  * whole Q2 stopped after 15 to 42 s of that, about once in 100 thrash
  * seconds, and the watchdog reset it with no record
- * (docs/bugs/thrash-watchdog-reset.md). Thrash must therefore not last.
+ * (q2-factory projects/kernel/STATUS.md, KRN-001). Thrash must therefore not last.
  *
  * Trigger: MemAvailable below 20 MB and at least 30 major faults in the
  * second, 2 seconds running. In the 22 recorded blocks this never fires
