@@ -1,0 +1,32 @@
+name: Portal OS checks
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/portal-checks.yml'
+      - 'os/install/portal_artifact.py'
+      - 'os/install/test_portal_*.py'
+      - 'os/install/integration/usr/libexec/q2-network/**'
+      - 'os/portal_phone_runtime.py'
+      - 'os/test_portal_phone.py'
+
+permissions:
+  contents: read
+
+jobs:
+  portal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check the network scripts
+        run: |
+          for script in os/install/integration/usr/libexec/q2-network/*; do
+            sh -n "$script"
+          done
+      - name: Test the DHCP CAPPORT hook and the paired helper artifact
+        run: |
+          python3 os/install/test_portal_capport_hook.py -v
+          python3 os/install/test_portal_artifact.py -v
