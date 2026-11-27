@@ -2,3 +2,8 @@
 /build
 __pycache__/
 *.py[cod]
+
+# Core and memory dumps (qemu-user writes qemu_<prog>_<time>_<pid>.core)
+*.core
+core.[0-9]*
+vgcore.*
