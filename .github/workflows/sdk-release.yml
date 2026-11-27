@@ -90,6 +90,27 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Build matching production kernel, keyless rescue and modules
+        if: github.event_name == 'push'
+        working-directory: runtime-source
+        run: |
+          python3 os/install/kernel_base.py \
+            --sdk-bundle build/qualified-sdk --platform build/qualified-platform \
+            --output build/qualified-kernel
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name == 'push'
+        with:
+          name: q2-kernel-base
+          path: |
+            runtime-source/build/qualified-kernel/xImage
+            runtime-source/build/qualified-kernel/rescue.cpio
+            runtime-source/build/qualified-kernel/shanling-q2.dtb
+            runtime-source/build/qualified-kernel/linux.config
+            runtime-source/build/qualified-kernel/kernel-modules.tar.gz
+            runtime-source/build/qualified-kernel/kernel-base.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
       - name: Collect corresponding source and notices for the tagged release
         if: github.event_name == 'push'
         working-directory: runtime-source
@@ -100,6 +121,8 @@ jobs:
           test -s "$legal/host-manifest.csv"
           git -C build/os/buildroot-2026.08.1 archive --format=tar.gz --prefix=buildroot/ HEAD > "$legal/buildroot-source.tar.gz"
           git archive --format=tar.gz --prefix=q2-os/ HEAD > "$legal/q2-os-source.tar.gz"
+          linux=$(jq -er '.linux.commit' build/qualified-kernel/kernel-base.json)
+          git -C "build/os/release-linux-${linux:0:12}" archive --format=tar.gz --prefix=linux/ "$linux" > "$legal/linux-source.tar.gz"
           tar -C build/os/out -czf build/os/buildroot-legal-info.tar.gz legal-info
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: github.event_name == 'push'
@@ -133,6 +156,10 @@ jobs:
         with:
           name: q2-sdk-compliance
           path: build/release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: q2-kernel-base
+          path: build/release-assets
       - name: Recheck the assets and publish a tagged SDK prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -141,9 +168,16 @@ jobs:
             --sdk-bundle build/release-assets --platform build/release-assets
           cd build/release-assets
           files=(mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz sdk-manifest.json sdk-test.json
-                 buildroot.config SHA256SUMS target.tar.gz platform.json buildroot-legal-info.tar.gz)
+                 buildroot.config SHA256SUMS target.tar.gz platform.json buildroot-legal-info.tar.gz
+                 xImage rescue.cpio shanling-q2.dtb linux.config kernel-modules.tar.gz kernel-base.json)
           sha256sum "${files[@]}" > RELEASE-SHA256SUMS
           files+=(RELEASE-SHA256SUMS)
+          PYTHONPATH=../../os python3 - <<'PY'
+          from pathlib import Path
+          import os
+          from compose_ci import release_platform
+          release_platform(Path('.').resolve(), os.environ['GITHUB_SHA'])
+          PY
           printf 'Qualified Q2 SDK and matching userspace platform for %s.\n\nFor downstream cross-builds and QEMU integration.\n' "$GITHUB_SHA" > ../release-notes.md
           gh release create "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
             --draft --prerelease --latest=false --verify-tag \

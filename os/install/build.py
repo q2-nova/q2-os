@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -28,6 +27,8 @@ import startup_read_ahead
 import tsrs_artifact
 import portal_phone_runtime
 import x2000_c
+from kernel_build import SUPPORT_DIRS, build_kernel, copy, engine, inside, prepare_rescue
+from kernel_base import install_base, source_commit
 from build import LOCK
 from fork_checkout import verify
 
@@ -36,12 +37,6 @@ def run(args, **kw):
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-def copy(source, target, mode=None):
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_symlink(): target.unlink()
-    shutil.copyfile(source, target)
-    if mode is not None: target.chmod(mode)
 
 import bluetooth_firmware as bt_firmware
 BLUETOOTH_FIRMWARE = bt_firmware.FILES
@@ -79,7 +74,9 @@ def tailscale_inputs_refusal(daemon, tsrsd, tailscale_dir):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--kernel-source', type=Path, required=True, help='clean public Linux source from os/install/prepare.py')
+    kernel = p.add_mutually_exclusive_group(required=True)
+    kernel.add_argument('--kernel-source', type=Path, help='clean public Linux source from os/install/prepare.py')
+    kernel.add_argument('--kernel-base', type=Path, help='tagged keyless kernel and matched release assets')
     p.add_argument('--buildroot-target', type=Path, required=True)
     p.add_argument('--authorized-key', type=Path, help='personal image only: client public key outside Git')
     p.add_argument('--host-key', type=Path, help='override the personal image’s generated host identity with an external Dropbear private key')
@@ -117,6 +114,8 @@ def main():
         p.error(str(error))
     if a.qemu_fixture and (a.authorized_key or a.wifi_tools or a.bluetooth_firmware or a.integration_overlay):
         p.error('--qemu-fixture uses keyless USB diagnostics and the maintained local service overlay, with no hardware radio payload or emulator shell')
+    if a.kernel_base is not None and not a.qemu_fixture:
+        p.error('--kernel-base is for the keyless QEMU profile')
     if not a.qemu_fixture and a.wifi_tools is None:
         p.error('installed hardware builds require --wifi-tools')
     refusal = tailscale_inputs_refusal(a.tailscale, a.tsrsd, a.tailscale_dir)
@@ -142,37 +141,22 @@ def main():
     except (OSError, ValueError) as error:
         p.error(str(error))
     validate_timezone_data(a.buildroot_target)
-    src, out = a.kernel_source.resolve(), a.output.resolve()
-    for path in (src, out):
+    src = a.kernel_source.resolve() if a.kernel_source is not None else None
+    out = a.output.resolve()
+    for path in (out,) if src is None else (src, out):
         if not path.is_relative_to(ROOT / 'build') or any(part.startswith('player-hardware') for part in path.parts):
             p.error('use isolated source/output under build/, never player-hardware')
-    if src == out or src.is_relative_to(out) or out.is_relative_to(src):
+    if src is not None and (src == out or src.is_relative_to(out) or out.is_relative_to(src)):
         p.error('source and output must not overlap')
-    if not (src / '.git').exists(): p.error('prepare the isolated kernel source first')
     br = a.buildroot_target.resolve().parent
     if out.exists(): p.error('choose a fresh --output directory')
     out.mkdir(parents=True, mode=0o700 if a.authorized_key is not None else 0o755)
-    def inside(path): return '/work/' + str(Path(path).absolute().relative_to(ROOT))
-    def engine(args, image='q2-qemu-build'):
-        run(['podman', 'run', '--rm', '--network', 'none', '--security-opt', 'label=disable',
-             '-v', f'{ROOT}:/work', '-w', '/work', image, *args])
     source_record = LOCK['linux_production']
-    verify(src, source_record['commit'])
-    root, rescue = out / 'root', out / 'rescue'
-    for path in (root, rescue):
-        if path.exists(): shutil.rmtree(path)
+    root = out / 'root'
     shutil.copytree(a.buildroot_target, root, symlinks=True)
-    for tree in (root, rescue):
-        for name in ('bin', 'sbin', 'lib', 'usr/lib', 'usr/sbin', 'dev', 'proc', 'sys', 'run', 'tmp', 'root', 'etc', 'mnt/mmc', 'mnt/userdata', 'state', 'newroot'):
-            (tree / name).mkdir(parents=True, exist_ok=True)
-        copy(HW / 'usb', tree / 'sbin/q2-diagnostic-usb', 0o755)
-    for name in ('bin/busybox', 'usr/sbin/dropbear', 'lib/libc.so.6', 'lib/ld-linux-mipsn8.so.1', 'lib/libresolv.so.2', 'usr/lib/libcrypt.so.2'):
-        copy(a.buildroot_target / name, rescue / name, 0o755)
-    for name in ('passwd', 'shadow', 'group', 'nsswitch.conf', 'hosts'):
-        copy(root / 'etc' / name, rescue / 'etc' / name, 0o600 if name == 'shadow' else 0o644)
-    # Never depend on vendor passwd data; target is a generated Buildroot tree.
-    (rescue / 'bin/sh').symlink_to('busybox')
-    copy(HERE / 'bootstrap', rescue / 'init', 0o755)
+    for name in SUPPORT_DIRS:
+        (root / name).mkdir(parents=True, exist_ok=True)
+    copy(HW / 'usb', root / 'sbin/q2-diagnostic-usb', 0o755)
     copy(HERE / 'root-init', root / 'sbin/q2-installed-init', 0o755)
     copy(HERE / 'state', root / 'sbin/q2-state', 0o755)
     copy(HW / 'player-bringup', root / 'sbin/q2-player-bringup', 0o755)
@@ -206,9 +190,8 @@ def main():
         shutil.copytree(overlay, root, dirs_exist_ok=True, symlinks=True)
     if tsrsd is not None:
         tsrs_artifact.install(tsrs_binary, root)
-    for tree in (root, rescue):
-        ssh.stage(tree)
-        copy(HERE / 'diagnostic-ssh', tree / 'sbin/q2-diagnostic-ssh', 0o755)
+    ssh.stage(root)
+    copy(HERE / 'diagnostic-ssh', root / 'sbin/q2-diagnostic-ssh', 0o755)
     (root / 'sbin/q2-sim-ready').unlink(missing_ok=True)
     if a.qemu_fixture:
         copy(HERE / 'qemu-ready', root / 'sbin/q2-sim-ready', 0o755)
@@ -230,38 +213,16 @@ def main():
             '-L' + inside(root / 'usr/lib'), '-lq2platform'], 'q2-os-build')
     for source, dest in [(ROOT / 'os/platform/usb-auto-events.c', root / 'usr/sbin/q2-usb-auto-events'), (HERE / 'ubi-attach.c', root / 'sbin/q2-ubi-attach'), (HW / 'update/q2-hw-update.c', root / 'sbin/q2-hw-update')]:
         engine([compiler, '-Os', '-Wall', '-Wextra', '-Werror', inside(source), '-o', inside(dest)], 'q2-os-build')
-    epoch = json.loads((ROOT / 'os/sources.json').read_text())['source_date_epoch']
-    for path in [rescue, *rescue.rglob('*')]: os.utime(path, (epoch, epoch), follow_symlinks=False)
-    names = b'\0'.join(str(x.relative_to(rescue)).encode() for x in sorted(rescue.rglob('*'))) + b'\0'
-    with (out / 'rescue.cpio').open('wb') as f:
-        run(['cpio', '--null', '-o', '-H', 'newc', '--owner=0:0', '--reproducible'], input=names, stdout=f, cwd=rescue)
-    kout = out / 'kernel'; kout.mkdir(exist_ok=True)
-    make = ['make', '-s', '-C', inside(src), 'O=' + inside(kout), 'ARCH=mips',
-            'CROSS_COMPILE=mipsel-linux-gnu-', '-j2']
-    engine(make + [source_record['defconfig']])
-    engine([inside(src / 'scripts/config'), '--file', inside(kout / '.config'), '--set-str', 'INITRAMFS_SOURCE', inside(out / 'rescue.cpio')])
-    engine(make + ['olddefconfig', 'uzImage.bin', 'modules', 'dtbs'])
-    engine(make + ['modules_install', 'INSTALL_MOD_PATH=' + inside(root), 'INSTALL_MOD_STRIP=1', 'DEPMOD=true'])
-    release = (kout / 'include/config/kernel.release').read_text().strip()
-    modroot = root / 'lib/modules' / release
-    for link in ('build', 'source'): (modroot / link).unlink(missing_ok=True)
-    if not a.qemu_fixture:
-        driver = out / 'rtl8733bs'
-        run(['python3', ROOT / 'kernel/rtl8733bs/prepare.py', '--dest', driver])
-        engine(['make', '-s', '-C', inside(driver), '-j2', 'ARCH=mips',
-                'CROSS_COMPILE=mipsel-linux-gnu-', 'KSRC=' + inside(kout), 'modules'])
-        copy(driver / '8733bs.ko', modroot / 'extra/8733bs.ko')
-        engine(['mipsel-linux-gnu-strip', '--strip-debug', inside(modroot / 'extra/8733bs.ko')])
-    engine(['depmod', '-b', inside(root), release])
-    config = (kout / '.config').read_text()
+    epoch = LOCK['source_date_epoch']
+    os_commit = source_commit()
+    if a.kernel_base is None:
+        prepare_rescue(a.buildroot_target, out / 'rescue', out / 'rescue.cpio', ssh)
+        release, modroot, config_path = build_kernel(src, out, root, hardware=not a.qemu_fixture)
+    else:
+        release, modroot, config_path = install_base(a.kernel_base.resolve(), out, root, a.buildroot_target, os_commit)
+    config = config_path.read_text()
     if a.bluetooth_firmware and 'CONFIG_REGULATOR_USERSPACE_CONSUMER=y' not in config:
         raise RuntimeError('missing the Bluetooth enable hold: REGULATOR_USERSPACE_CONSUMER')
-    for option in ('MTD_BLOCK_SKIPBAD', 'MTD_UBI', 'UBIFS_FS', 'SQUASHFS', 'USB_CONFIGFS_RNDIS', 'SMP'):
-        if f'CONFIG_{option}=y' not in config: raise RuntimeError('missing required built-in: ' + option)
-    for option in ('MTD_PARTITIONED_MASTER', 'MTD_CMDLINE_PARTS', 'MTD_BLOCK'):
-        if f'CONFIG_{option}=y' in config or f'CONFIG_{option}=m' in config: raise RuntimeError('unwanted MTD interface: ' + option)
-    copy(kout / 'arch/mips/boot/uzImage.bin', out / 'xImage')
-    copy(kout / 'arch/mips/boot/dts/ingenic/shanling-q2.dtb', out / 'shanling-q2.dtb')
     uimage((out / 'xImage').read_bytes())
     # Keep the watcher and its target event executable together in both fresh
     # builds and refresh workflows. A script-only image cannot return on eject.
@@ -270,7 +231,6 @@ def main():
         portal_phone_runtime.validate(root, portal_radio)
         if portal_phone_runtime.admit(a.wifi_tools) != portal_radio:
             raise ValueError('private AP radio tool inputs changed during composition')
-    verify(src, source_record['commit'])
     verify(app_source, app_commit)
     installed_portal = root / portal_artifact.INSTALLED
     if (installed_portal.resolve() != installed_portal or not installed_portal.is_file()
@@ -302,13 +262,12 @@ def main():
     engine(['mksquashfs', inside(root), inside(out / 'rootfs.squashfs'), '-noappend', '-all-root', *root_compression.args(a.root_compression), '-no-xattrs', '-mkfs-time', str(epoch)], 'q2-os-build')
     squashfs((out / 'rootfs.squashfs').read_bytes())
     compression = root_compression.verify(out / 'rootfs.squashfs', a.root_compression)
-    os_commit = subprocess.check_output(['git', '-C', ROOT, 'rev-parse', 'HEAD'], text=True).strip()
     manifest = {'os_source_commit': os_commit, 'profile': 'split-installed-candidate', 'hardware_qualified': False, 'emulator_shell': False,
                 'qemu_fixture': a.qemu_fixture, 'kernel_source_commit': source_record['commit'],
                 'root_compression': compression,
                 'integration_hook_present': (root / 'sbin/q2-installed-services').is_file(),
                 'artifacts': {n: {'sha256': sha(out / n), 'bytes': (out / n).stat().st_size} for n in ('xImage', 'rootfs.squashfs', 'rescue.cpio', 'shanling-q2.dtb')},
-                'kernel_release': release, 'kernel_config_sha256': sha(kout / '.config'),
+                'kernel_release': release, 'kernel_config_sha256': sha(config_path),
                 'prepared_source_commit': source_record['commit'],
                 'packaging': packaging, 'x2000_c': x2000_record,
                 'installer_sources': {p.name: sha(p) for p in HERE.iterdir() if p.is_file()}, 'app_source_commit': app_commit, 'app_sha256': app_sha, 'portal_helper': portal, 'tailscale': tailscale, 'tsrsd': tsrsd,

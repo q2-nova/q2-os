@@ -1,7 +1,8 @@
 # Buildroot SDK releases
 
 Pushing a signed `vX.Y.Z-rc.N` tag builds the SDK and matching Buildroot
-target from that commit. The workflow first qualifies SDK relocation, time64,
+target from that commit, then builds the pinned production Linux kernel,
+keyless rescue image, device tree and matching modules. The workflow first qualifies SDK relocation, time64,
 MIPS ABI and the touchscreen bridge. It collects corresponding sources and
 notices, then uploads a draft, verifies GitHub's asset sizes and digests
 against local bytes and publishes the intact draft as a prerelease.
@@ -17,7 +18,10 @@ contains:
 - `mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz`, `sdk-manifest.json`,
   `sdk-test.json`, `buildroot.config`, and `SHA256SUMS`
 - `target.tar.gz` and `platform.json`, bound to the exact SDK and configuration
-- `buildroot-legal-info.tar.gz` with Buildroot and q2-os source and license data
+- `xImage`, `rescue.cpio`, `shanling-q2.dtb`, `linux.config`,
+  `kernel-modules.tar.gz` and `kernel-base.json`, bound to the userspace platform
+- `buildroot-legal-info.tar.gz` with corresponding Linux, Buildroot and q2-os
+  source and license data
 - `RELEASE-SHA256SUMS` covering the other files
 
 The player and standalone component repos use the SDK without depending on
@@ -32,8 +36,7 @@ python3 Q2_OS/os/compose_ci.py \
   --release-tag V0.01 --output Q2_OS/build/os/ci-installed-image
 ```
 
-Use absolute paths with the command above. The composer builds the pinned
-production kernel, stages matching modules and emits a keyless QEMU
-candidate. It accepts the selected TSRS source checkout and verifies the
+Use absolute paths with the command above. The composer verifies and reuses the published kernel and rescue bytes,
+stages their matching modules and emits a keyless QEMU candidate. It accepts the selected TSRS source checkout and verifies the
 daemon receipt against it and the pinned upstream TSRS inputs. The image is
 for generated local or CI QEMU testing.

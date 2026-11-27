@@ -2,20 +2,21 @@
 """Compose a keyless QEMU candidate from tagged Q2 OS Release assets."""
 import argparse
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import subprocess
 import sys
-import tarfile
 import tempfile
 
-from build import LOCK, ROOT, WORK, run, sha
+from archives import unpack
+from build import ROOT, WORK, run, sha
 from fork_checkout import verify
+from install import kernel_base
 import sdk_platform
 import sdk_release
 
 RELEASE_FILES = (sdk_release.ARCHIVE, sdk_release.MANIFEST, sdk_release.REPORT,
                  sdk_release.CONFIG, 'SHA256SUMS', sdk_platform.ARCHIVE,
-                 sdk_platform.RECORD, 'buildroot-legal-info.tar.gz')
+                 sdk_platform.RECORD, 'buildroot-legal-info.tar.gz', *kernel_base.FILES)
 
 
 def release_platform(bundle, commit):
@@ -23,33 +24,7 @@ def release_platform(bundle, commit):
     sums = ''.join(f'{sha(sdk_release.regular(bundle, name))}  {name}\n' for name in RELEASE_FILES)
     if sdk_release.regular(bundle, 'RELEASE-SHA256SUMS').read_text() != sums:
         raise ValueError('release checksum list differs from the verified assets')
-    return record
-
-
-def archive_names(archive):
-    with tarfile.open(archive) as content:
-        members = content.getmembers()
-    files = {}
-    for member in members:
-        path = PurePosixPath(member.name)
-        if (path.is_absolute() or '..' in path.parts or path in files
-                or not (member.isfile() or member.isdir() or member.issym() or member.islnk())):
-            raise ValueError('unsafe or ambiguous SDK archive member')
-        files[path] = member
-    for path, member in files.items():
-        for parent in path.parents:
-            if parent in files and not files[parent].isdir():
-                raise ValueError('SDK archive member descends through a non-directory')
-        if member.islnk():
-            target = PurePosixPath(member.linkname)
-            if target not in files or not files[target].isfile():
-                raise ValueError('SDK archive hard link must target a bundled regular file')
-    return files
-
-
-def unpack(archive, output):
-    archive_names(archive)
-    run(['tar', '-xzf', archive, '--no-same-owner', '-C', output])
+    return record, kernel_base.verify_base(bundle, record)
 
 
 def restore_platform(bundle, platform):
@@ -64,40 +39,26 @@ def restore_platform(bundle, platform):
     return target
 
 
-def build_containers():
-    run([sys.executable, ROOT / 'os/build.py', 'container'])
-    qemu = LOCK['qemu_installed']
-    repo = qemu['url'].removeprefix('https://github.com/').removesuffix('.git')
-    url = 'https://raw.githubusercontent.com/' + repo + '/' + qemu['commit'] + '/tests/q2/Containerfile'
-    with tempfile.TemporaryDirectory(dir=WORK, prefix='kernel-container-') as directory:
-        recipe = Path(directory) / 'Containerfile'
-        run(['curl', '--fail', '--location', '--retry', '3', url, '-o', recipe])
-        if sha(recipe) != qemu['containerfile_sha256']:
-            raise ValueError('public QEMU kernel container recipe digest differs')
-        run(['podman', 'build', '-t', 'q2-qemu-build', '-f', recipe, directory])
-
-
 def compose(args):
     commit = subprocess.check_output(['git', '-C', ROOT, 'rev-parse', 'HEAD'], text=True).strip()
     verify(ROOT, commit)
     assets = args.assets.resolve(strict=True)
-    record = release_platform(assets, commit)
+    record, kernel = release_platform(assets, commit)
+    record['kernel_source_commit'] = kernel['linux']['commit']
+    record['kernel_container'] = kernel['kernel_container']
     WORK.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=WORK, prefix='ci-platform-') as directory:
         platform = Path(directory) / 'platform'
         target = restore_platform(assets, platform)
-        build_containers()
-        for image in ('q2-os-build', 'q2-qemu-build'):
-            record[image] = subprocess.check_output(
-                ['podman', 'image', 'inspect', image, '--format', '{{.Id}}'], text=True).strip()
+        run([sys.executable, ROOT / 'os/build.py', 'container'])
+        record['q2-os-build'] = subprocess.check_output(
+            ['podman', 'image', 'inspect', 'q2-os-build', '--format', '{{.Id}}'], text=True).strip()
         host = platform / 'host'
         run(['podman', 'run', '--rm', '--network', 'none', '--security-opt', 'label=disable',
              '-v', f'{ROOT}:/work', 'q2-os-build',
              '/work/' + str((host / 'relocate-sdk.sh').relative_to(ROOT))])
-        src = WORK / ('release-linux-' + LOCK['linux_production']['commit'][:12])
-        run([sys.executable, ROOT / 'os/install/prepare.py', '--dest', src])
         run([sys.executable, ROOT / 'os/install/build.py', '--qemu-fixture',
-             '--kernel-source', src, '--buildroot-target', target,
+             '--kernel-base', assets, '--buildroot-target', target,
              '--player-source', args.player_source.resolve(), '--app', args.app.resolve(),
              '--tsrsd', args.tsrsd.resolve(), '--tsrs-source', args.tsrs_source.resolve(),
              '--release-tag', args.release_tag, '--output', args.output.resolve(),
