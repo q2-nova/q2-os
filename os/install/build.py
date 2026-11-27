@@ -77,6 +77,7 @@ def main():
     kernel = p.add_mutually_exclusive_group(required=True)
     kernel.add_argument('--kernel-source', type=Path, help='clean public Linux source from os/install/prepare.py')
     kernel.add_argument('--kernel-base', type=Path, help='tagged keyless kernel and matched release assets')
+    p.add_argument('--kernel-platform-assets', type=Path, help='tagged SDK/platform inputs for a keyless stock kernel kit')
     p.add_argument('--buildroot-target', type=Path, required=True)
     p.add_argument('--authorized-key', type=Path, help='personal image only: client public key outside Git')
     p.add_argument('--host-key', type=Path, help='override the personal image’s generated host identity with an external Dropbear private key')
@@ -114,8 +115,9 @@ def main():
         p.error(str(error))
     if a.qemu_fixture and (a.authorized_key or a.wifi_tools or a.bluetooth_firmware or a.integration_overlay):
         p.error('--qemu-fixture uses keyless USB diagnostics and the maintained local service overlay, with no hardware radio payload or emulator shell')
-    if a.kernel_base is not None and not a.qemu_fixture:
-        p.error('--kernel-base is for the keyless QEMU profile')
+    stock_base = a.kernel_base is not None and not a.qemu_fixture
+    if stock_base and (a.kernel_platform_assets is None or a.authorized_key or a.bluetooth_firmware):
+        p.error('a stock kernel kit requires matching platform assets and keyless, Wi-Fi-only inputs')
     if not a.qemu_fixture and a.wifi_tools is None:
         p.error('installed hardware builds require --wifi-tools')
     refusal = tailscale_inputs_refusal(a.tailscale, a.tsrsd, a.tailscale_dir)
@@ -219,7 +221,10 @@ def main():
         prepare_rescue(a.buildroot_target, out / 'rescue', out / 'rescue.cpio', ssh)
         release, modroot, config_path = build_kernel(src, out, root, hardware=not a.qemu_fixture)
     else:
-        release, modroot, config_path = install_base(a.kernel_base.resolve(), out, root, a.buildroot_target, os_commit)
+        release, modroot, config_path = install_base(
+            a.kernel_base.resolve(), out, root, a.buildroot_target, os_commit,
+            platform_assets=a.kernel_platform_assets.resolve() if stock_base else None,
+            stock_wifi=stock_base)
     config = config_path.read_text()
     if a.bluetooth_firmware and 'CONFIG_REGULATOR_USERSPACE_CONSUMER=y' not in config:
         raise RuntimeError('missing the Bluetooth enable hold: REGULATOR_USERSPACE_CONSUMER')

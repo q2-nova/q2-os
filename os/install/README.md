@@ -201,3 +201,43 @@ internal persistence is not qualified. The actual device is Q1GA/E5-71,
 128 MiB and one plane, correcting the emulator-derived Q2GA assumption.
 See [exact hashes and qualification](../../docs/mainline-installation.md) and
 [the maintained checklist](../../docs/mainline-feature-checklist.md).
+
+## Stock candidate from verified OS inputs
+
+Download the SDK, target and base files from one selected q2-os RC and verify
+its Release asset digests and `RELEASE-SHA256SUMS`. Keep the original OS source
+revision in its SDK receipt. A later installer can reuse it only when the
+Buildroot inputs match. Prepare the stock Wi-Fi and kernel kit once under
+`build/`:
+
+```sh
+python3 os/compose_stock.py prepare --assets VERIFIED_OS_RELEASE \
+  --output build/os/stock-inputs-01
+```
+
+The preparation uses the selected production Linux and public RTL8733BS,
+wpa_supplicant, libnl, iw, hostapd and dnsmasq sources. It builds the real
+driver and WPA2-profile tools. Keep the kit and receipt together. The QEMU
+kernel release has the in-tree modules, so the stock preparation builds one
+matching kernel tree with the external driver. Subsequent paired player
+updates can compose against the same kit and SDK:
+
+```sh
+python3 os/compose_stock.py image --assets VERIFIED_OS_RELEASE \
+  --stock-inputs build/os/stock-inputs-01 \
+  --player-source PLAYER_CHECKOUT --app PAIRED_PLAYER_OUTPUT/q2nd \
+  --tsrs-source TSRS_CHECKOUT --tsrsd VERIFIED_TSRS_OUTPUT \
+  --qemu-user QEMU_MIPSEL --release-tag V0.01 \
+  --output build/os/stock-candidate-01
+```
+
+The composer uses the normal installed service overlay and produces a
+keyless candidate with `xImage`, `rootfs.squashfs`, `rescue.cpio`,
+`shanling-q2.dtb` and `artifact.json`. Reuse across app releases keeps the
+exact kernel, rescue, module set and radio tools. A new radio recipe or
+incompatible SDK requires fresh stock preparation.
+
+This candidate still requires stock recovery and first-install hardware
+qualification. The stock route omits the vendor Bluetooth payload. Review
+the embedded Wi-Fi firmware's redistribution terms, corresponding sources
+and third-party notices before distributing an image.

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 
-from build import sha
+from build import ROOT, sha
 import sdk_release
 
 ARCHIVE = 'target.tar.gz'
@@ -27,6 +27,34 @@ def verify(platform, sdk_bundle, commit):
     if record != identity(sdk, archive):
         raise ValueError('platform target must match the exact qualified SDK')
     return record
+
+
+# Source paths read by the external Buildroot tree or its post-build script.
+SDK_INPUTS = (
+    'LICENSE', 'os/build.py', 'os/fork_checkout.py', 'os/Containerfile', 'os/Config.in', 'os/external.desc',
+    'os/external.mk', 'os/configs', 'os/busybox.fragment', 'os/package',
+    'os/platform', 'os/probes', 'os/overlay', 'os/patches/packages',
+    'os/post-build.py', 'os/fixtures.py', 'os/compatibility.py',
+    'os/compat/inputs.json', 'os/timezone_data.py', 'os/timezones',
+)
+
+
+def compatible_assets(bundle, runtime_commit):
+    """Keep the original SDK source identity across app-only installer revisions."""
+    commit = sdk_release.read_json(sdk_release.regular(bundle, sdk_release.MANIFEST))['os_commit']
+    platform = verify(bundle, bundle, commit)
+    if commit != runtime_commit:
+        subprocess.run(['git', '-C', ROOT, 'cat-file', '-e', commit + '^{commit}'], check=True)
+        result = subprocess.run(['git', '-C', ROOT, 'diff', '--quiet', commit, runtime_commit,
+                                 '--', *SDK_INPUTS])
+        if result.returncode:
+            raise ValueError('tagged SDK source inputs differ from this installer')
+        old = json.loads(subprocess.check_output(
+            ['git', '-C', ROOT, 'show', commit + ':os/sources.json']))
+        current = json.loads((ROOT / 'os/sources.json').read_text())
+        if any(old[key] != current[key] for key in ('buildroot', 'source_date_epoch')):
+            raise ValueError('tagged SDK build inputs differ from this installer')
+    return platform
 
 
 def freeze(target, sdk_bundle, commit, output):

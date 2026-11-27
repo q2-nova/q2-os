@@ -42,10 +42,12 @@ def module_hashes(directory):
             for path in sorted(directory.rglob('*.ko'))}
 
 
-def verify_base(bundle, platform):
+def verify_base(bundle, platform, *, stock_wifi=False):
     identity = sdk_release.read_json(sdk_release.regular(bundle, MANIFEST))
     if (identity.get('schema') != 1 or identity.get('platform') != platform
             or identity.get('linux') != LOCK['linux_production']
+            or identity.get('stock_wifi', False) != stock_wifi
+            or (stock_wifi and 'extra/8733bs.ko' not in identity.get('modules', {}))
             or identity.get('diagnostic_ssh') != {'profile': 'disabled'}
             or not re.fullmatch(r'sha256:[0-9a-f]{64}', identity.get('kernel_container', ''))
             or not re.fullmatch(r'[a-zA-Z0-9.+_-]+', identity.get('kernel_release', ''))
@@ -55,9 +57,10 @@ def verify_base(bundle, platform):
     return identity
 
 
-def install_base(bundle, out, root, target, commit):
-    platform = sdk_platform.verify(bundle, bundle, commit)
-    identity = verify_base(bundle, platform)
+def install_base(bundle, out, root, target, commit, *, platform_assets=None, stock_wifi=False):
+    platform = (sdk_platform.compatible_assets(platform_assets, commit) if stock_wifi
+                else sdk_platform.verify(bundle, bundle, commit))
+    identity = verify_base(bundle, platform, stock_wifi=stock_wifi)
     # The supplied target must yield the same keyless rescue inputs.
     check = out / 'rescue-input-check.cpio'
     prepare_rescue(target, out / 'rescue-input-check', check, InstalledSsh(None, None, None, None))
@@ -78,10 +81,11 @@ def install_base(bundle, out, root, target, commit):
     return release, modules / release, out / 'linux.config'
 
 
-def produce(bundle, platform_dir, output):
+def produce(bundle, platform_dir, output, *, stock_wifi=False):
     commit = source_commit()
     verify(ROOT, commit)
-    platform = sdk_platform.verify(platform_dir, bundle, commit)
+    platform = (sdk_platform.compatible_assets(bundle, commit) if stock_wifi
+                else sdk_platform.verify(platform_dir, bundle, commit))
     # Build from the exact qualified platform, including the rescue executables.
     target_archive = platform_dir / sdk_platform.ARCHIVE
     if not output.is_relative_to(ROOT / 'build'):
@@ -96,15 +100,17 @@ def produce(bundle, platform_dir, output):
     container = build_kernel_container()
     ssh = InstalledSsh(None, None, None, None)
     prepare_rescue(target, output / 'rescue', output / 'rescue.cpio', ssh)
-    release, modules, config = build_kernel(source, output, output / 'module-stage')
+    release, modules, config = build_kernel(source, output, output / 'module-stage', hardware=stock_wifi)
     copy(config, output / 'linux.config')
     run(['tar', '--sort=name', '--owner=0', '--group=0', '--numeric-owner',
          '-C', modules.parent, '-czf', output / MODULES, release])
     record = dict(schema=1, platform=platform, linux=linux, kernel_container=container,
                   kernel_release=release, diagnostic_ssh=ssh.receipt,
                   artifacts=identities(output), modules=module_hashes(modules))
+    if stock_wifi:
+        record['stock_wifi'] = True
     (output / MANIFEST).write_text(json.dumps(record, indent=2) + '\n')
-    return verify_base(output, platform)
+    return verify_base(output, platform, stock_wifi=stock_wifi)
 
 
 def main():
