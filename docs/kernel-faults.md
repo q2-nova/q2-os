@@ -53,10 +53,6 @@ minute; host checks run the extractor tests.
 | `wifi-pwrseq` | `pwrseq_q2.c`, whole | the MMC power sequence is published only after aldo1, bldo1 and bldo2 are acquired, over 4096 generated arrival orders; a DT without one of the supply properties, an allocation failure, a supply error and a registration failure leave nothing published | published without acquiring the supplies; missing supply property accepted |
 | `backlight` | the production DT's backlight node; `pwm_bl.c` `compute_duty_cycle`; `pwm-ingenic-x2000.c` apply, program, state readback and clock accounting | 101 distinct DT levels from 0 through 16 to 255 on channel 0 with a 100 µs period; every percentage requests a higher duty than the one below and 100 % requests the full period; on all 16 channels at two clock rates each request programs high and low phases that add up to the period, with one low clock at full duty (DISPLAY-003), and keeps the other channels' bits in the shared registers; prescalers 0 to 14; disable; out-of-range periods, a busy channel, running DMA, inverted polarity and a clock error change no register | zero low phase at full duty; other channels' prescalers cleared |
 
-`x2000_pwm_program` shifts the signed constant `0xf` into bit 31 for channels 7
-and 15. GCC defines the result, as the kernel build relies on, so the
-`backlight` harness builds without UBSan's shift-base check.
-
 ## The fault kernel
 
 `os/kernel_faults.py build` compiles the `linux_production` commit and

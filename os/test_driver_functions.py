@@ -226,15 +226,10 @@ MUTATIONS = {
             '\tif (duty >= period) {\n\t\tif (period < 2)\n\t\t\treturn -ERANGE;\n\t\tduty = period - 1;\n\t}\n',
             '', 'two_phases'),
         'other channels\' prescalers cleared': (
-            'x2000_pwm_update(p, PWM_CCFG(n), 0xf << shift, scale << shift);',
+            'x2000_pwm_update(p, PWM_CCFG(n), 0xfU << shift, scale << shift);',
             'writel(scale << shift, p->base + PWM_CCFG(n));', 'CCFG'),
     },
 }
-
-# x2000_pwm_program writes `0xf << shift`, a signed shift into bit 31 for
-# channels 7 and 15. GCC defines it, as the kernel's build relies on; UBSan's
-# shift-base check would stop at it before any assertion.
-EXTRA_CFLAGS = {'backlight': ['-fno-sanitize=shift-base']}
 
 DTS = 'arch/mips/boot/dts/ingenic/shanling-q2.dts'
 
@@ -291,7 +286,7 @@ def build_and_run(name, source, mutation=None):
         shutil.rmtree(out)
     out.mkdir(parents=True)
     (out / 'check.c').write_text(generate(name, source, mutation))
-    compiled = subprocess.run([compiler(), *CFLAGS, *SANITIZERS, *EXTRA_CFLAGS.get(name, ()), str(out / 'check.c'),
+    compiled = subprocess.run([compiler(), *CFLAGS, *SANITIZERS, str(out / 'check.c'),
                                '-o', str(out / 'check')], capture_output=True, text=True, timeout=120)
     (out / 'compile.log').write_text(compiled.stdout + compiled.stderr)
     if compiled.returncode:

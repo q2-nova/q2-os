@@ -19,7 +19,7 @@
   "rust_toolchain": "nightly-2026-11-12",
   "qemu_url": "https://github.com/q2-nova/qemu.git",
   "linux_production": {
-    "commit": "a67b4e3a4f6fa1de1bfae8ab8d6bfea2d80d34a7",
+    "commit": "c0129102566901f50816189b5a69a204257dd238",
     "url": "https://github.com/q2-nova/linux.git",
     "defconfig": "shanling_q2_production_defconfig"
   },
