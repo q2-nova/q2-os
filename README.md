@@ -28,7 +28,7 @@ The builder fetches the exact public Buildroot commit in `os/sources.json` and c
 
 The SDK archive is `build/os/out/images/mipsel-buildroot-linux-gnu_sdk-buildroot.tar.gz`. The test relocates the SDK in a temporary directory, compiles and links a time64 C program, and records its ELF ABI in `build/os/sdk-test.json`.
 
-The SDK build uses generated emulator fixtures. For a player-enabled emulator build, supply both a matching `q2nd` and `q2-launcher` in `build/os/out/artifacts/`. The emulator uses a separate public QEMU compatibility revision and its own pinned kernel series. See the [installation build guide](os/install/README.md) for stock-device image assembly and its validation requirements.
+The SDK build uses generated emulator fixtures. For a player-enabled emulator build, stage `q2nd` from a q2-player paired build with `os/rust-build.py --player`; `os/post-build.py` then installs the launcher from `os/launcher.sh`. The emulator uses a separate public QEMU compatibility revision and its own pinned kernel series. See the [installation build guide](os/install/README.md) for stock-device image assembly and its validation requirements.
 
 ## USB SSH from a microSD card
 
