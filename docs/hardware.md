@@ -16,6 +16,7 @@ Every fact carries one source and one level.
 | datasheet | From a manufacturer's datasheet, manual or application note |
 | vendor source | From Ingenic SDK, Realtek or Linux driver source, not checked on a Q2 |
 | stock firmware | From static analysis of the stock firmware (kernel, device tree, modules, `demo`), not run on a Q2 |
+| host | Shown by a host test with generated fixtures, not run on a Q2 |
 | unverified | Stated by a source that was not checked |
 
 Sources named in the tables:
@@ -199,7 +200,7 @@ page.
 | Stock probe levels: PB01 low, PB14 high, PB10 high, PB09 low, PB02 low. `dac_pwr(1)` asserts mute, waits 200 ms, raises PB01, waits 50 ms. Init pulses PB14 0, 1, 0 with 20 ms steps | stock `cs43131_probe`, `dac_pwr`, `cs43131_dac_init.part.0` | stock firmware |
 | PB02 is raised only in the high-volume branch of `dac_set_volume` (volume 90 and above), not as a codec supply enable; the analog rail it drives is unknown | stock `dac_set_volume.part.0` | stock firmware |
 | PCM path control 2 is 5 on 0x30 and 0x31 and 7 on 0x32 and 0x33: copy A to B with B inverted, with A/B swap on the second pair | stock init tables; DS1155F2 §7.5.6 | stock firmware |
-| The codecs need AXP2101 DCDC5 off: with register 0x80 bit 4 set (`0x1f`) the first codec's supply enable drops USB; with `0x0f`, the stock value, all four codecs probe. The electrical reason is unknown | PMIC register change and codec probe | device-verified |
+| Probe order decides codec power-up. With the codec driver enabling its supplies before the machine driver has set the board lines, the first codec's supply enable drops USB while AXP2101 DCDC5 is on (0x80 = `0x1f`), and clearing DCDC5 (`0x0f`) avoids it. With the machine driver bound first (stock idle levels, 200 ms mute settle), all four codecs probe from a cold start with DCDC5 on. The electrical reason is unknown | PMIC register change and codec probe; ordered bring-up ([PLAYER.md](../os/hardware/PLAYER.md)) | device-verified |
 | The analog output stage (four codecs and the board stage) costs about 114 mW at digital silence | power contrast | device-verified |
 | The playback stream path (stream, I²S and DACs) costs about 133 mW | power contrast | device-verified |
 | HP_OUT_CTL_1 (0x080000) bits 5:4 `OUT_FS`: 00 0.5 Vrms, 01 1 Vrms, 10 1.41 Vrms, 11 1.73 Vrms (reset); bit 0 `+1dB_EN` gives 2 Vrms with `OUT_FS` 11 and `HV_EN` 1. Change only with PDN_HP set (§7.5.1) | DS1155F2 | datasheet |
@@ -258,7 +259,7 @@ electrical origin of PD18 are not known. No pin has been driven to test them.
 | 0x12 bit 3 applies to the battery-only power-off state, not to running operation | AXP2101 datasheet (register 0x12) | datasheet |
 | Charge voltage register 0x64: selector 3 is 4.2 V, selector 4 is 4.35 V. At 4.2 V a charged cell raises the battery-overvoltage interrupt and the device restarts when USB is removed; at 4.35 V it does not | stock `axp2101_charger_probe`; AXP2101 datasheet (register 0x64); register change and USB removal | device-verified |
 | Stock charge settings: 1,000 mA charge current (running, suspended and off), 100 mA termination, 4.35 V target, 2,000 mA USB input limit | stock device tree charger node | stock firmware |
-| DCDC4 is the core rail at 0.95 V. DCDC5 is on at 1.4 V after a cold start (0x80 = 0x1f) and must be off for the codecs (above) | stock device tree; register reads | device-verified |
+| DCDC4 is the core rail at 0.95 V. DCDC5 is on at 1.4 V after a cold start (0x80 = 0x1f); see Audio for its effect on codec power-up | stock device tree; register reads | device-verified |
 | ALDO1 1.8 V: Wi-Fi SDIO. ALDO2 and ALDO4: panel. ALDO3 2.8 V: touchscreen. BLDO1 and BLDO2: Wi-Fi supply chain. DCDC1 to DCDC4, ALDO1, ALDO3, BLDO1 and BLDO2 read on at the stock voltages | register reads; stock drivers | device-verified |
 | Rail-control registers 0x80 to 0x87 and 0x90 to 0x9a do not change across system suspend | read-only snapshot at the regulator suspend boundary | device-verified |
 

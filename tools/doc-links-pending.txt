@@ -23,8 +23,6 @@ kernel/rtl8733bs/README.md ../../docs/validation/rf-cached-datapath.md
 kernel/rtl8733bs/README.md ../../docs/validation/rf-cached-ps-state.md
 kernel/rtl8733bs/README.md ../../docs/validation/rf-cold-disconnect.md
 kernel/rtl8733bs/README.md ../../docs/validation/wifi-cold-suspend.md
-os/hardware/PLAYER.md ../../docs/bugs/sd-card-cold-boot.md
-os/hardware/PLAYER.md ../../docs/mainline-battery-audit.md
 os/hardware/README.md ../../docs/hardware-os-trial.md
 os/hardware/README.md ../../docs/hardware-os-updates.md
 os/install/README.md ../../docs/mainline-feature-checklist.md
