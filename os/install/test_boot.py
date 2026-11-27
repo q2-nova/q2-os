@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """SPL/NAND root qualification on sanitized disposable QEMU fixtures only."""
+from contextlib import nullcontext
 import argparse
 import hashlib
 import importlib.util
@@ -241,7 +242,7 @@ def raise_readiness_timeout(ssh,out,cycle,result):
     result['readiness_failure_snapshot']=capture_readiness_failure(ssh,out,cycle)
     raise TimeoutError('root readiness timeout')
 
-def run_guest_phases(ssh, scripts, out, cycle, timeout, records, persist, host_grace=10, after_phase=None, energy=None):
+def run_guest_phases(ssh, scripts, out, cycle, timeout, records, persist, host_grace=10, after_phase=None, energy=None, wake_observer=None):
     """At most three independently bounded phases; stop on the first failure."""
     if not 1 <= len(scripts) <= 3 or not 1 <= timeout <= 240:
         raise ValueError('one to three phases, each bounded 1–240 seconds')
@@ -254,8 +255,9 @@ def run_guest_phases(ssh, scripts, out, cycle, timeout, records, persist, host_g
         try:
             if energy:
                 row['modeled_energy'] = dict(start=energy.snapshot(out/'ctl.sock'))
-            check=run_guest_script(ssh,script,out,cycle,timeout,host_grace,
-                phase=phase if len(scripts)>1 else None)
+            with wake_observer(energy.control, out, row) if wake_observer else nullcontext():
+                check=run_guest_script(ssh,script,out,cycle,timeout,host_grace,
+                    phase=phase if len(scripts)>1 else None)
             if energy and check.returncode == 0:
                 capture = row['modeled_energy']
                 capture['end'] = energy.snapshot(out/'ctl.sock')
@@ -393,6 +395,7 @@ def main():
     p.add_argument('--debug-qmp',action='store_true',help='local QMP socket for an owned disposable guest diagnostic')
     p.add_argument('--debug-sd-requests',action='store_true',
                    help='retain command and data-block traces for a generated microSD')
+    p.add_argument('--measure-deep-wake', action='store_true', help='press Power in verified retained sleep and measure lit scanout in virtual time')
     p.add_argument('--capture-boot-display', action='store_true',
                    help='observe display changes through the owned guest QMP socket during cold boot')
     p.add_argument('--host-cpuset', help='comma-separated CPU IDs for the container QEMU process')
@@ -416,6 +419,11 @@ def main():
     p.add_argument('--warm-reboot-between-phases',action='store_true',help='one disposable same-emulator kernel restart between each guest phase; requires one cold boot and player health')
     p.add_argument('--ssh-multiplex',action='store_true',help='owned short-lived SSH control socket for generated fixtures only')
     a = p.parse_args()
+    wake_observer = None
+    if a.measure_deep_wake:
+        if not (a.modeled_energy and a.require_player and a.require_single_boot and a.guest_script):
+            p.error("deep wake requires a generated single-boot player phase and modeled clocks")
+        from deep_wake import measure as wake_observer
     energy = None
     if (a.energy_wifi or a.energy_bt or a.energy_profile or a.energy_icount_shift is not None) and not a.modeled_energy:
         p.error('energy options require --modeled-energy')
@@ -495,6 +503,8 @@ def main():
             p.error('use a canonical output path under build/')
     else:
         out = output_root / tag
+    if a.measure_deep_wake and len(os.fsencode(out / 'ctl.sock')) >= 108:
+        p.error('output path is too long for model control sockets')
     out.mkdir(parents=True, exist_ok=False)
     card_image = None
     if playback_card or a.generated_direct_read_card:
@@ -766,7 +776,7 @@ def main():
                                                 energy.control(out/'ctl.sock', f'radio {lane} {mode}')
                                     check = run_guest_phases(ssh,guest_scripts,out,cycle,a.guest_script_timeout,
                                         result['guest_phases'],persist_phase,host_grace=a.guest_script_host_grace,
-                                        after_phase=transition if a.warm_reboot_between_phases else None,energy=energy)
+                                        after_phase=transition if a.warm_reboot_between_phases else None,energy=energy,wake_observer=wake_observer)
                                 except subprocess.TimeoutExpired:
                                     result['guest_script_passed'] = False
                                     result['guest_script_host_timeout'] = True
