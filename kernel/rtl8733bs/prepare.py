@@ -7,6 +7,8 @@ archive bytes are not guaranteed stable, so the check is a digest over the
 extracted tree: sorted relative paths, executable bits and file SHA-256s.
 
 usage: kernel/rtl8733bs/prepare.py [--dest build/rtl8733bs/src] [--stock-ko FILE]
+       [--sae-external-auth] [--cold-suspend] [--cached-power-state [--cached-datapath]]
+       [--cold-disconnect]
 """
 import argparse
 import hashlib
@@ -57,11 +59,13 @@ def firmware_arrays(src):
     return out
 
 
-def selected_patches(*,sae=False,cold=False,cached=False):
-    # The later diagnostic producers replay 0008/0009 with their own
-    # qualified bases. Ordinary preparation never applies those experiments.
+def selected_patches(*,sae=False,cold=False,cached=False,datapath=False,disconnect=False):
+    """Patches 0004 and 0006-0009 are opt-in; ordinary preparation leaves them out.
+    0008 extends 0007's formatter, so it needs `cached`."""
+    if datapath and not cached:
+        raise ValueError('the cached data-path formatter (0008) needs the cached power state (0007)')
     optional = {'0004-': sae, '0006-': cold, '0007-': cached,
-                '0008-': False, '0009-': False}
+                '0008-': datapath, '0009-': disconnect}
     return [p for p in sorted((HERE/'patches').glob('*.patch'))
             if all(enabled or not p.name.startswith(prefix) for prefix,enabled in optional.items())]
 
@@ -76,7 +80,13 @@ def main():
                     help='experimental cold SDIO suspend lifecycle; separate hardware qualification required')
     ap.add_argument('--cached-power-state', action='store_true',
                     help='optional read-only cached power-state diagnostics; no policy change')
+    ap.add_argument('--cached-datapath', action='store_true',
+                    help='optional non-atomic cached data-path counters (needs --cached-power-state)')
+    ap.add_argument('--cold-disconnect', action='store_true',
+                    help='experimental: report a disconnect before cold firmware teardown')
     a = ap.parse_args()
+    if a.cached_datapath and not a.cached_power_state:
+        ap.error('--cached-datapath needs --cached-power-state')
     dest = (ROOT / a.dest).resolve()
     if not dest.is_relative_to(ROOT / 'build'):
         sys.exit('--dest must be under build/')
@@ -86,7 +96,7 @@ def main():
     cache.parent.mkdir(parents=True, exist_ok=True)
     if not cache.exists():
         url = f'https://codeload.github.com/{REPO}/tar.gz/{COMMIT}'
-        req = urllib.request.Request(url, headers={'User-Agent': 'q2-navidrome'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'q2-os'})
         with urllib.request.urlopen(req, timeout=120) as r:
             cache.with_suffix('.download').write_bytes(r.read())
         cache.with_suffix('.download').rename(cache)
@@ -126,7 +136,8 @@ def main():
     git('init', '-q')
     git('add', '-A')
     git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', f'Realtek RTL8733BS {DRIVERVERSION} ({REPO}@{COMMIT[:12]})')
-    patches = selected_patches(sae=a.sae_external_auth,cold=a.cold_suspend,cached=a.cached_power_state)
+    patches = selected_patches(sae=a.sae_external_auth,cold=a.cold_suspend,cached=a.cached_power_state,
+                               datapath=a.cached_datapath,disconnect=a.cold_disconnect)
     git('-c', 'commit.gpgsign=false', 'am', '-q', '--committer-date-is-author-date', *map(str, patches))
     staging.rename(dest)
     print(f'Prepared {dest.relative_to(ROOT)}: {len(patches)} patches on {COMMIT[:12]}')

@@ -75,3 +75,10 @@ static void rtw_dump_cached_datapath(struct seq_file *m, _adapter *adapter)
 		(unsigned long long)s.rx_ampdu_loss, (unsigned long long)s.rx_conflict);
 }
 '''
+
+HOOK='\trtw_dump_cached_datapath(m, padapter);\n'
+
+
+def projection(before,after):
+    """`after` is `before` plus FORMATTER and its one proc hook, nothing else."""
+    if after.count(FORMATTER+'\n')!=1 or after.count(HOOK)!=1 or after.replace(FORMATTER+'\n','').replace(HOOK,'')!=before:raise ValueError('only exact passive formatter and one hook may change')

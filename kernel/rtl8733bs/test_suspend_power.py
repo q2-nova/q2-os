@@ -3,11 +3,10 @@
 
 No RF/firmware or electrical power claim. Hardware and full-kernel tests remain.
 """
-import argparse,hashlib,json,subprocess,sys
+import argparse,hashlib,json,subprocess
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'kernel/watchdog'))
-from test_driver import function
+import driver_source
+from driver_source import function
 
 PREFIX=r'''
 #include <assert.h>
@@ -152,4 +151,7 @@ def run(source,out):
  finally:(out/'result.json').write_text(json.dumps(r,indent=2)+'\n')
  return r
 if __name__=='__main__':
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--source',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();r=run(a.source,a.out);print(json.dumps(dict(passed=r['passed'],cases=len(r['cases']))))
+ p=argparse.ArgumentParser(description=__doc__)
+ p.add_argument('--source',type=Path,help='cold-suspend driver tree (default: prepared cold variant)')
+ p.add_argument('--out',type=Path,help='fresh output directory (default: under build/rtl8733bs/tests/)')
+ a=p.parse_args();r=run(a.source or driver_source.tree('cold'),a.out or driver_source.output('suspend-power'));print(json.dumps(dict(passed=r['passed'],cases=len(r['cases']))))

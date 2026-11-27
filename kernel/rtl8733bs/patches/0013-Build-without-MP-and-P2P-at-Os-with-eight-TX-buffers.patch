@@ -3,8 +3,7 @@ From: Nova <361320585+q2-nova@users.noreply.github.com>
 Date: Fri, 20 Nov 2026 23:35:02 -0600
 Subject: [PATCH] Build without MP and P2P, at -Os, with eight TX buffers
 
-Memory headroom on the Q2 (docs/validation/memory-headroom-kernel-2026-11-21.md),
-measured against the V0.123 kernel build:
+Memory headroom on the Q2, measured against the V0.123 kernel build:
 
 - CONFIG_MP_INCLUDED off: the factory test mode (iwpriv mp_*). Text
   -82.5 kB, rodata -12.9 kB.

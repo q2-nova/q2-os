@@ -1,14 +1,16 @@
-import hashlib,importlib.util,json,shutil,sys,tempfile,unittest,uuid
-from pathlib import Path
+"""Causal controls for the cached-PS formatter (patch 0007) on prepared driver trees."""
+import json,shutil,unittest
 import cached_ps as codec
+import driver_source
+import prepare
 import test_cached_ps as native
-import prepare_cached_ps as prep
-sys.path.insert(0,str(prep.ROOT/'tests/perf'))
-import qualified_fixtures as fixtures
+PATCH=driver_source.HERE/'patches/0007-Expose-nonblocking-cached-power-management-state.patch'
 class CachedPS(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.baseline=driver_source.tree('cold');cls.source=driver_source.tree('cached-ps')
     def setUp(self):
-        self.source=fixtures.input('rf-ps-cache-source-02/source');fixtures.bind_inputs(self,prep,'BASELINE')
-        self.out=prep.ROOT/'build/cached-ps-controls'/uuid.uuid4().hex;self.out.mkdir(parents=True)
+        self.out=driver_source.output('cached-ps-controls');self.out.mkdir()
     def variant(self,name,replace):
         src=self.out/name;(src/'core').mkdir(parents=True);(src/'include').mkdir()
         text=(self.source/'core/rtw_debug.c').read_text();changed=replace(text)
@@ -18,8 +20,9 @@ class CachedPS(unittest.TestCase):
 
     def test_actual_formatter_property_features_busy_and_source_projection(self):
         r=native.run(self.source,self.out/'actual');self.assertTrue(r['passed']);self.assertEqual(r['contexts'],16384);self.assertEqual(r['busy_cases'],4)
-        prep.only_snapshot_changed((prep.BASELINE/'frozen/core/rtw_debug.c').read_text(),(self.source/'core/rtw_debug.c').read_text())
-        with self.assertRaises(ValueError):prep.only_snapshot_changed((prep.BASELINE/'frozen/core/rtw_debug.c').read_text(),(self.source/'core/rtw_debug.c').read_text()+'\n/* unrelated edit */\n')
+        before=(self.baseline/'core/rtw_debug.c').read_text();after=(self.source/'core/rtw_debug.c').read_text()
+        codec.only_snapshot_changed(before,after)
+        with self.assertRaises(ValueError):codec.only_snapshot_changed(before,after+'\n/* unrelated edit */\n')
 
     def test_native_real_timer_wrapper_rejects_the_original_bad_pointer(self):
         src=self.variant('bad-timer',lambda s:s.replace('!!_check_timer_is_active(&dvobj->dynamic_chk_timer)','!!timer_pending(&dvobj->dynamic_chk_timer)'))
@@ -47,25 +50,16 @@ class CachedPS(unittest.TestCase):
             with self.assertRaises(ValueError):native.extract(src/'core/rtw_debug.c')
 
     def test_decoder_closed_enums_bounds_and_busy(self):
-        line=fixtures.input('rf-ps-cache-native-04/scan1-cfg1.log').read_text().splitlines()[0]
+        r=native.run(self.source,self.out/'decoder');self.assertTrue(r['passed'])
+        line=(self.out/'decoder/scan1-cfg1.log').read_text().splitlines()[0]
         self.assertEqual(codec.parse(line)['cpwm'],13);self.assertIsNone(codec.parse(' Cached PS: version=1 busy=1'))
         for bad in (line+' extra=1',line.replace('firmware_ps=0','firmware_ps=2'),line.replace('cpwm=13','cpwm=256'),line.replace('cfg_pm=0','cfg_pm=3'),line.replace('deny=0xdead0000','deny=private'),' Cached PS: version=1 busy=1 mode=0'):
             with self.assertRaises(ValueError):codec.parse(bad)
 
-    def test_baseline_digest_source_bytes_and_modes_are_admitted(self):
-        base=self.out/'baseline';(base/'frozen/core').mkdir(parents=True);file=base/'frozen/core/rtw_debug.c';file.write_text('fixture');file.chmod(0o644)
-        r=dict(passed=True,build={'cleanup':[{'absent':True}]},inputs={'core/rtw_debug.c':prep.sha(file)},input_modes={'core/rtw_debug.c':False})
-        (base/'result.json').write_text(json.dumps(r));digest=prep.sha(base/'result.json');prep.admit(base,digest)
-        with self.assertRaises(ValueError):prep.admit(base,'0'*64)
-        file.write_text('changed')
-        with self.assertRaises(ValueError):prep.admit(base,digest)
-        file.write_text('fixture');file.chmod(0o755)
-        with self.assertRaises(ValueError):prep.admit(base,digest)
-
     def test_normal_preparation_keeps_diagnostics_opt_in(self):
-        spec=importlib.util.spec_from_file_location('rtl_source_prepare',Path(__file__).with_name('prepare.py'));module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        ordinary=module.selected_patches();diagnostic=module.selected_patches(cached=True)
-        self.assertNotIn(prep.PATCH,ordinary);self.assertEqual(set(diagnostic)-set(ordinary),{prep.PATCH})
-        self.assertEqual(set(module.selected_patches(cold=True,cached=True))-set(module.selected_patches(cold=True)),{prep.PATCH})
+        ordinary=prepare.selected_patches();diagnostic=prepare.selected_patches(cached=True)
+        self.assertNotIn(PATCH,ordinary);self.assertEqual(set(diagnostic)-set(ordinary),{PATCH})
+        self.assertEqual(set(prepare.selected_patches(cold=True,cached=True))-set(prepare.selected_patches(cold=True)),{PATCH})
+        with self.assertRaises(ValueError):prepare.selected_patches(datapath=True)
 
 if __name__=='__main__':unittest.main()

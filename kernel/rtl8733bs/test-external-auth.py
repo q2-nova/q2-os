@@ -85,13 +85,21 @@ def block(text, name):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kernel-source', type=Path, required=True)
-    parser.add_argument('--driver-source', type=Path, required=True)
+    parser.add_argument('--kernel-source', type=Path,
+                        help='production Linux source (python3 os/install/prepare.py --dest build/...)')
+    parser.add_argument('--driver-source', type=Path,
+                        help='driver tree with patch 0004 (default: prepared sae variant)')
     parser.add_argument('--sdk', type=Path)
     parser.add_argument('--qemu', type=Path)
     args = parser.parse_args()
     if bool(args.sdk) != bool(args.qemu):
         parser.error('--sdk and --qemu must be supplied together')
+    if args.kernel_source is None:
+        print('SKIP: needs --kernel-source, a production Linux source tree for include/net/cfg80211.h')
+        return
+    if args.driver_source is None:
+        import driver_source
+        args.driver_source = driver_source.tree('sae')
     linux = (args.kernel_source / 'include/net/cfg80211.h').read_text()
     vendor = (args.driver_source / 'os_dep/linux/ioctl_cfg80211.h').read_text()
     driver = (args.driver_source / 'os_dep/linux/ioctl_cfg80211.c').read_text()

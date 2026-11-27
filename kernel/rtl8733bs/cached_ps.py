@@ -21,3 +21,13 @@ def parse(line):
         if value>limit:raise ValueError('bounded cached field or feature enum required')
         result[name]=value
     return result
+
+
+def only_snapshot_changed(before,after):
+    """`after` is `before` plus the formatter and its one proc hook, nothing else."""
+    from driver_source import function
+    helper=function(after,'rtw_dump_cached_ps_state');start=after.index('/* Cached software state only.')
+    end=after.index(helper,start)+len(helper)
+    if after[end:end+2]!='\n\n':raise ValueError('closed new formatter block required')
+    projected=after[:start]+after[end+2:];hook='\trtw_dump_cached_ps_state(m, padapter);\n'
+    if projected.count(hook)!=1 or projected.replace(hook,'')!=before:raise ValueError('only new formatter and one proc hook may differ')

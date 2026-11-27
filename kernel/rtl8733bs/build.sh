@@ -2,7 +2,7 @@
 # Build the RTL8733BS Wi-Fi module against a configured Q2 kernel build.
 # usage: kernel/rtl8733bs/build.sh [MAKE_TARGETS...]     default: modules
 #   env DSRC   prepared driver tree (default build/rtl8733bs/src)
-#   env KOUT   kernel build directory from kernel/build.sh (default build/linux/out)
+#   env KOUT   configured Linux build directory with its modules built (default build/linux/out)
 # The kernel source referenced by KOUT must also lie under build/.
 set -eu
 cd "$(dirname "$0")/../.."

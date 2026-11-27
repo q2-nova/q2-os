@@ -3,13 +3,13 @@
 import argparse,hashlib,json,re,shutil,subprocess,sys
 from pathlib import Path
 import cached_datapath as codec
-import prepare_cached_datapath as prep
-function=prep.prep.function
+import driver_source
+from driver_source import function
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 
 def extract(source):
     text=source.read_text();body=function(text,'rtw_dump_cached_datapath')
-    if function(text,'proc_get_ps_info').count(prep.HOOK.strip())!=1:raise ValueError('actual proc consumer required')
+    if function(text,'proc_get_ps_info').count(codec.HOOK.strip())!=1:raise ValueError('actual proc consumer required')
     clean=re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"','',body,flags=re.S)
     calls=set(re.findall(r'\b([A-Za-z_]\w*)\s*\(',clean))-{'if','rtw_dump_cached_datapath'}
     if calls-{'adapter_to_pwrctl','adapter_to_dvobj','GET_HAL_DATA','down_trylock','_exit_pwrlock','RTW_PRINT_SEL','READ_ONCE','ATOMIC_READ'}:raise ValueError('only bounded cached reads allowed')
@@ -100,5 +100,6 @@ def run(source,out):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    for n in ('source','out'):p.add_argument('--'+n,type=Path,required=True)
-    a=p.parse_args();r=run(a.source,a.out);print(r['passed'])
+    p.add_argument('--source',type=Path,help='driver tree with patch 0008 (default: prepared cached-datapath variant)')
+    p.add_argument('--out',type=Path,help='fresh output directory (default: under build/rtl8733bs/tests/)')
+    a=p.parse_args();r=run(a.source or driver_source.tree('cached-datapath'),a.out or driver_source.output('cached-datapath'));print(r['passed'])

@@ -1,4 +1,5 @@
-"""Exact cold teardown delta: invalidate driver roaming before OS disconnect."""
+"""Exact cold teardown delta (patch 0009): invalidate driver roaming before OS disconnect."""
+CHANGED='os_dep/linux/os_intfs.c'
 DECL='\tstruct pwrctrl_priv *pwrpriv = adapter_to_pwrctl(padapter);\n'
 OLD='\tif (rtw_chk_roam_flags(padapter, RTW_ROAM_ON_RESUME)) {'
 NEW='''\t/* Cold teardown destroys firmware association and keys. Report the
@@ -15,6 +16,6 @@ def transformed(body):
     return body.replace(anchor,anchor+DECL).replace(OLD,NEW)
 
 def projection(before,after):
-    from prepare_cached_ps import function
+    from driver_source import function
     old=function(before,'rtw_suspend_free_assoc_resource');new=function(after,'rtw_suspend_free_assoc_resource')
     if new!=transformed(old) or after.replace(new,old,1)!=before:raise ValueError('only exact cold-disconnect lifecycle delta admitted')

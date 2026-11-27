@@ -6,9 +6,9 @@ The complete matching-module build and final hardware gates remain separate.
 """
 import argparse,hashlib,json,resource,shutil,subprocess
 from pathlib import Path
-import prepare_cold_association as prep
 import cold_association as change
-ROOT=prep.prep.ROOT
+import driver_source
+from driver_source import ROOT,function,sha
 CONTEXTS=16384
 CONFIGS=(('station',[]),('ap',['-DCONFIG_AP_MODE']),('p2p',['-DCONFIG_P2P','-DRTW_P2P_GROUP_INTERFACE=0']),('p2p-group',['-DCONFIG_P2P','-DRTW_P2P_GROUP_INTERFACE=1','-DCONFIG_AP_MODE']))
 PREFIX=r'''
@@ -99,19 +99,19 @@ def compile_case(body,reference,out,name,flags):
     command=[str(compiler),'-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',*flags,str(source),'-o',str(binary)]
     compiled=subprocess.run(command,capture_output=True,timeout=30)
     output=compiled.stdout+compiled.stderr
-    row=dict(name=name,flags=flags,command=command,compiler=str(compiler),compiler_sha256=prep.prep.sha(compiler),compiler_version=subprocess.check_output([str(compiler),'--version'],timeout=5,text=True).splitlines()[0],compile_exit_status=compiled.returncode,harness_sha256=prep.prep.sha(source),run_exit_status=None,passed=False)
+    row=dict(name=name,flags=flags,command=command,compiler=str(compiler),compiler_sha256=sha(compiler),compiler_version=subprocess.check_output([str(compiler),'--version'],timeout=5,text=True).splitlines()[0],compile_exit_status=compiled.returncode,harness_sha256=sha(source),run_exit_status=None,passed=False)
     if compiled.returncode==0:
         reply=subprocess.run([str(binary)],capture_output=True,timeout=10,preexec_fn=no_core);output+=reply.stdout+reply.stderr
-        row.update(run_exit_status=reply.returncode,binary_sha256=prep.prep.sha(binary),passed=reply.returncode==0 and reply.stdout==b'COLD_ASSOCIATION_PASS contexts=16384 cold=4096 warm=12288\n')
-    log.write_bytes(output);row['log_sha256']=prep.prep.sha(log);return row
+        row.update(run_exit_status=reply.returncode,binary_sha256=sha(binary),passed=reply.returncode==0 and reply.stdout==b'COLD_ASSOCIATION_PASS contexts=16384 cold=4096 warm=12288\n')
+    log.write_bytes(output);row['log_sha256']=sha(log);return row
 
-def run(source,out):
+def run(source,baseline,out):
+    """source: a driver tree with patch 0009; baseline: the same tree without it."""
     out=out.absolute()
     if out!=out.resolve() or not out.is_relative_to(ROOT/'build'):raise ValueError('fresh worktree-local native output required')
-    before=(prep.BASELINE/'frozen'/prep.CHANGED).read_text();after=(source/prep.CHANGED).read_text();change.projection(before,after)
-    if prep.prep.sha(prep.BASELINE/'result.json')!=prep.BASELINE_SHA:raise ValueError('exact predecessor receipt required')
-    out.mkdir(parents=True,exist_ok=False);body=prep.prep.function(after,'rtw_suspend_free_assoc_resource');reference=prep.prep.function(before,'rtw_suspend_free_assoc_resource')
-    r=dict(passed=False,hardware=False,source_sha256=hashlib.sha256(after.encode()).hexdigest(),baseline_source_sha256=hashlib.sha256(before.encode()).hexdigest(),baseline_receipt_sha256=prep.BASELINE_SHA,tool_sha256=prep.prep.sha(Path(__file__)),projection_sha256=prep.prep.sha(Path(change.__file__)),cases=[],scope='actual teardown C, controlled external callbacks and subset ABI; cold clears before callbacks, WoW behavior equals exact predecessor; full MIPS ABI/RF/hardware remain separate')
+    before=(baseline/change.CHANGED).read_text();after=(source/change.CHANGED).read_text();change.projection(before,after)
+    out.mkdir(parents=True,exist_ok=False);body=function(after,'rtw_suspend_free_assoc_resource');reference=function(before,'rtw_suspend_free_assoc_resource')
+    r=dict(passed=False,hardware=False,source_sha256=hashlib.sha256(after.encode()).hexdigest(),baseline_source_sha256=hashlib.sha256(before.encode()).hexdigest(),tool_sha256=sha(Path(__file__)),projection_sha256=sha(Path(change.__file__)),cases=[],scope='actual teardown C, controlled external callbacks and subset ABI; cold clears before callbacks, WoW behavior equals exact predecessor; full MIPS ABI/RF/hardware remain separate')
     try:
         for name,flags in CONFIGS:r['cases'].append(compile_case(body,reference,out,name,flags))
         r.update(passed=all(x['passed'] for x in r['cases']),contexts=CONTEXTS*len(CONFIGS),cold_contexts=4096*len(CONFIGS),retained_contexts=12288*len(CONFIGS))
@@ -120,4 +120,11 @@ def run(source,out):
     return r
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--source',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();r=run(a.source,a.out);print(json.dumps({k:r[k] for k in ('passed','contexts','cold_contexts','retained_contexts')}));raise SystemExit(0 if r['passed'] else 1)
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--source',type=Path,help='driver tree with patch 0009 (default: prepared cold-disconnect variant)')
+    p.add_argument('--baseline',type=Path,help='the same tree without 0009 (default: prepared cached-datapath variant)')
+    p.add_argument('--out',type=Path,help='fresh output directory (default: under build/rtl8733bs/tests/)')
+    a=p.parse_args()
+    if bool(a.source)!=bool(a.baseline):p.error('give --source and --baseline together')
+    r=run(a.source or driver_source.tree('cold-disconnect'),a.baseline or driver_source.tree('cached-datapath'),a.out or driver_source.output('cold-association'))
+    print(json.dumps({k:r[k] for k in ('passed','contexts','cold_contexts','retained_contexts')}));raise SystemExit(0 if r['passed'] else 1)

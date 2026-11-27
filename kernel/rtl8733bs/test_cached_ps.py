@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Execute the real cached-PS formatter with locks, feature variants and poison."""
-import argparse,hashlib,json,re,subprocess,sys
+import argparse,hashlib,json,re,subprocess
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'kernel/watchdog'))
-from test_driver import function
+import driver_source
+from driver_source import function
 from cached_ps import FIELDS,parse
 import cached_ps
 CALLS={'adapter_to_pwrctl','adapter_to_dvobj','down_trylock','RTW_PRINT_SEL','READ_ONCE','rtw_ps_deny_get','rtw_time_after','rtw_get_current_time','_exit_pwrlock','GET_HAL_DATA','ATOMIC_READ','timer_pending','_check_timer_is_active','rtw_cfg80211_pwr_mgmt'}
@@ -136,5 +135,6 @@ def run(source,out):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    for name in ('source','out'):parser.add_argument('--'+name,type=Path,required=True)
-    a=parser.parse_args();r=run(a.source,a.out);print(json.dumps({k:r[k] for k in ['passed','contexts','busy_cases']}))
+    parser.add_argument('--source',type=Path,help='driver tree with patch 0007 (default: prepared cached-ps variant)')
+    parser.add_argument('--out',type=Path,help='fresh output directory (default: under build/rtl8733bs/tests/)')
+    a=parser.parse_args();r=run(a.source or driver_source.tree('cached-ps'),a.out or driver_source.output('cached-ps'));print(json.dumps({k:r[k] for k in ['passed','contexts','busy_cases']}))

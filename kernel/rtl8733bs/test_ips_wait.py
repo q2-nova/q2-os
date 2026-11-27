@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Execute the actual installed/preserved IPS admission prefix under bounded faults."""
-import argparse,hashlib,json,subprocess,sys
+import argparse,hashlib,json,subprocess
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'kernel/watchdog'))
-from test_driver import function
+import driver_source
+from driver_source import function
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def prefix(path):
     text=function(path.read_text(),'rtw_suspend_common')
@@ -85,6 +84,10 @@ def run(source,control,out):
     return result
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    for name in ('source','control','out'):parser.add_argument('--'+name,type=Path,required=True)
-    args=parser.parse_args();r=run(args.source,args.control,args.out)
+    parser.add_argument('--source',type=Path,help='cold-suspend driver tree (default: prepared cold variant)')
+    parser.add_argument('--control',type=Path,help='ordinary driver tree (default: prepared baseline variant)')
+    parser.add_argument('--out',type=Path,help='fresh output directory (default: under build/rtl8733bs/tests/)')
+    args=parser.parse_args()
+    if bool(args.source)!=bool(args.control):parser.error('give --source and --control together')
+    r=run(args.source or driver_source.tree('cold'),args.control or driver_source.tree('baseline'),args.out or driver_source.output('ips-wait'))
     print(json.dumps(dict(passed=r['passed'],cases=len(r['cases']))))
