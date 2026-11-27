@@ -7,7 +7,7 @@ import struct
 from build import ROOT, WORK, LOCK, sha
 
 
-def elf(path):
+def elf(path, *, x2000=False):
     data = path.read_bytes()
     if data[:4] != b'\x7fELF': return None
     if data[4:6] != b'\x01\x01': raise ValueError(f'{path}: not ELF32 little endian')
@@ -44,7 +44,8 @@ def elf(path):
         if name == b'.MIPS.abiflags':
             fields = struct.unpack_from('<H6B4I', data, section[4])
             fp = fields[6]
-            if fields[1:6] != (32, 2, 1, 2, 0) or fp != 6:
+            layout = (32, 5, 1, 3, 0) if x2000 else (32, 2, 1, 2, 0)
+            if fields[1:6] != layout or fp != 6:
                 raise ValueError(f'{path}: unexpected MIPS ABI flags {fields}')
     if stack_flags != 6: raise ValueError(f'{path}: missing non-executable stack contract ({stack_flags})')
     if fp is None: raise ValueError(f'{path}: missing MIPS ABI flags')
