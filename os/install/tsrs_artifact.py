@@ -6,6 +6,7 @@ from pathlib import Path
 
 PIN = Path(__file__).with_name('tsrs.json')
 DESTINATION = Path('usr/libexec/q2-network/tsrsd')
+NOTICES = 'licenses/THIRD-PARTY-NOTICES'
 
 
 def sha256(data):
@@ -13,7 +14,7 @@ def sha256(data):
 
 
 def admit(directory, source_commit=None):
-    """Return the verified daemon bytes and their installed-image provenance."""
+    """Return the verified daemon bytes, its third-party notices and their installed-image provenance."""
     directory = directory.resolve()
     pin = json.loads(PIN.read_text())
     if source_commit is not None:
@@ -46,12 +47,18 @@ def admit(directory, source_commit=None):
                      ('size_sha256', read('size.json'))):
         if record.get(key) != sha256(raw):
             raise ValueError(f'tsrsd build record mismatch for {key}')
-    return binary, {
+    if 'notices_sha256' not in record:
+        raise ValueError(f'tsrsd build records no third-party notices ({NOTICES}); use a tsrs release that ships them')
+    notices = read(NOTICES)
+    if not notices.strip() or record['notices_sha256'] != sha256(notices):
+        raise ValueError('tsrsd build record mismatch for notices_sha256')
+    return binary, notices, {
         'sha256': record['q2_sha256'],
         'bytes': len(binary),
         'source_commit': pin['source_commit'],
         'tailscale_rs_commit': pin['tailscale_rs_commit'],
         'patch_sha256': pin['patch_sha256'],
+        'notices_sha256': record['notices_sha256'],
         'record_sha256': sha256(raw_record),
     }
 

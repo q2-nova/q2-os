@@ -47,7 +47,12 @@ scripts.
 of q2-player `tools/build-target.py`. Keep the neighboring `q2-portal` binary and
 both symbol receipts in their original layout. The installer binds the player
 to the companion from the same source commit and installs the companion in
-`usr/libexec/q2-network/`. Generate the full `--wifi-tools` output with
+`usr/libexec/q2-network/`. It installs `q2nd.THIRD-PARTY-NOTICES` and
+`q2-portal.THIRD-PARTY-NOTICES` from the paired build, checked against the
+`third_party_notices` record of its `result.json`, as
+`usr/share/licenses/q2nd/THIRD-PARTY-NOTICES` and
+`usr/share/licenses/q2-portal/THIRD-PARTY-NOTICES`; a paired build without
+them is refused. Generate the full `--wifi-tools` output with
 `os/hardware/build-wifi-tools.py` for the matching SDK, including the private
 access-point files needed by phone entry.
 
@@ -71,11 +76,18 @@ python3 TSRS_CHECKOUT/build.py q2 \
 ```
 
 CI can transfer the resulting directory to the image job as an artifact, keeping
-`tsrsd`, `result.json`, `size.json`, and `symbols/receipt.json` together.
+`tsrsd`, `result.json`, `size.json`, `symbols/receipt.json` and
+`licenses/THIRD-PARTY-NOTICES` together.
 For a local build, point `--tsrsd` at any directory with the same pinned artifact
 layout. The installer checks the source revision and upstream patch identity,
 requires a little-endian MIPS ELF executable, and verifies the hashes before
-installing the daemon. The SDK build itself needs no standalone daemon inputs
+installing the daemon. It installs the daemon's third-party notices, checked
+against `notices_sha256` of `result.json`, as
+`usr/share/licenses/tsrsd/THIRD-PARTY-NOTICES`; a build without them is
+refused. Before packing the root, the builder refuses an image in which
+`q2nd`, `q2-portal` or `tsrsd` is installed without its notices, and
+records the installed notices in `artifact.json` under
+`third_party_notices`. The SDK build itself needs no standalone daemon inputs
 or access to its repository. Use `--tailscale go --tailscale-dir GENERATED_GO_DIR`
 instead to package the Go daemon and CLI from their existing staged directory.
 

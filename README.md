@@ -85,5 +85,7 @@ kernel terms ([GPL-2.0](LICENSES/GPL-2.0.txt)) and individual notices. Patches t
 BusyBox and other upstream projects follow the applicable upstream terms.
 The IANA time zone table is public domain. The bundled Noto Emoji font keeps
 its [SIL Open Font License](os/overlay/usr/share/fonts/noto-emoji/OFL.txt).
+The image carries the third-party notices of q2nd, q2-portal and tsrsd in
+`/usr/share/licenses/` ([os/install](os/install/README.md#build)).
 External SDK and image components have their own terms and notices. See the
 [SDK promotion procedure](docs/sdk-promotion.md) before redistributing assets.

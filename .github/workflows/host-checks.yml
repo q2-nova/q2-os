@@ -39,6 +39,7 @@ jobs:
           python3 os/install/test_overlay.py
           python3 os/test_sdk_release.py
           python3 os/install/test_tsrs_artifact.py
+          python3 os/install/test_third_party_notices.py
           python3 os/install/test_portal_artifact.py
           python3 os/install/test_portal_capport_hook.py
           python3 os/test_kernel_faults.py

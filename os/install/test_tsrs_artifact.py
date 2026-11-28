@@ -21,6 +21,9 @@ class StandaloneDaemon(unittest.TestCase):
         (self.bundle / 'tsrsd').write_bytes(self.binary)
         (self.bundle / 'symbols/receipt.json').write_bytes(symbols)
         (self.bundle / 'size.json').write_bytes(sizes)
+        self.notices = b'Third-party software notices: tsrsd\n'
+        (self.bundle / 'licenses').mkdir()
+        (self.bundle / tsrs_artifact.NOTICES).write_bytes(self.notices)
         pin = json.loads(tsrs_artifact.PIN.read_text())
         self.record = {
             **{key: pin[key] for key in ('source_commit', 'tailscale_rs_commit', 'patch_sha256')},
@@ -30,6 +33,7 @@ class StandaloneDaemon(unittest.TestCase):
             'q2_sha256': tsrs_artifact.sha256(self.binary),
             'symbols_receipt_sha256': tsrs_artifact.sha256(symbols),
             'size_sha256': tsrs_artifact.sha256(sizes),
+            'notices_sha256': tsrs_artifact.sha256(self.notices),
         }
         self.write_record()
 
@@ -37,7 +41,9 @@ class StandaloneDaemon(unittest.TestCase):
         (self.bundle / 'result.json').write_text(json.dumps(self.record))
 
     def test_admit_and_install_exact_bytes(self):
-        binary, provenance = tsrs_artifact.admit(self.bundle)
+        binary, notices, provenance = tsrs_artifact.admit(self.bundle)
+        self.assertEqual(notices, self.notices)
+        self.assertEqual(provenance['notices_sha256'], self.record['notices_sha256'])
         root = self.fixture / 'image'
         (self.bundle / 'tsrsd').write_bytes(b'changed after admission')
         tsrs_artifact.install(binary, root)
@@ -63,7 +69,7 @@ class StandaloneDaemon(unittest.TestCase):
         chosen = 'b' * 40
         self.record['source_commit'] = chosen
         self.write_record()
-        _, admission = tsrs_artifact.admit(self.bundle, chosen)
+        _, _, admission = tsrs_artifact.admit(self.bundle, chosen)
         self.assertEqual(admission['source_commit'], chosen)
         self.record['patch_sha256'] = '0' * 64
         self.write_record()
@@ -86,6 +92,18 @@ class StandaloneDaemon(unittest.TestCase):
     def test_modified_symbols_receipt(self):
         (self.bundle / 'symbols/receipt.json').write_text('{}')
         with self.assertRaisesRegex(ValueError, 'symbols_receipt_sha256'):
+            tsrs_artifact.admit(self.bundle)
+
+    def test_notices_required(self):
+        (self.bundle / tsrs_artifact.NOTICES).write_bytes(b'changed\n')
+        with self.assertRaisesRegex(ValueError, 'notices_sha256'):
+            tsrs_artifact.admit(self.bundle)
+        (self.bundle / tsrs_artifact.NOTICES).unlink()
+        with self.assertRaisesRegex(ValueError, 'regular licenses/THIRD-PARTY-NOTICES'):
+            tsrs_artifact.admit(self.bundle)
+        del self.record['notices_sha256']
+        self.write_record()
+        with self.assertRaisesRegex(ValueError, 'records no third-party notices'):
             tsrs_artifact.admit(self.bundle)
 
     def test_binary_symlink(self):

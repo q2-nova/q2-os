@@ -26,6 +26,7 @@ import portal_artifact
 import runtime_resources
 import startup_read_ahead
 import tsrs_artifact
+import third_party_notices
 import portal_phone_runtime
 import x2000_c
 from kernel_build import SUPPORT_DIRS, build_kernel, copy, engine, inside, prepare_rescue
@@ -169,7 +170,7 @@ def main():
                 source = a.tsrs_source.resolve()
                 selected_tsrs = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
                 verify(source, selected_tsrs)
-            tsrs_binary, tsrsd = tsrs_artifact.admit(a.tsrsd, selected_tsrs)
+            tsrs_binary, tsrs_notices, tsrsd = tsrs_artifact.admit(a.tsrsd, selected_tsrs)
         except (OSError, ValueError) as error:
             p.error(str(error))
     if a.x2000_c is not None and a.toolchain_repo is None:
@@ -178,6 +179,7 @@ def main():
         p.error('--strip-tool is required for production packaging')
     try:
         portal_binary, portal, app_commit, app_sha = portal_artifact.paired_full_build(a.app.absolute())
+        notices = third_party_notices.player(a.app.absolute(), app_sha, portal['sha256'])
         app_source = a.player_source.resolve()
         verify(app_source, app_commit)
         portal_radio = portal_phone_runtime.admit(a.wifi_tools) if a.wifi_tools else None
@@ -234,6 +236,8 @@ def main():
         shutil.copytree(overlay, root, dirs_exist_ok=True, symlinks=True)
     if tsrsd is not None:
         tsrs_artifact.install(tsrs_binary, root)
+        notices['tsrsd'] = tsrs_notices
+    notice_hashes = third_party_notices.install(root, notices)
     ssh.stage(root)
     copy(HERE / 'diagnostic-ssh', root / 'sbin/q2-diagnostic-ssh', 0o755)
     if not a.qemu_fixture and not a.authorized_key:
@@ -293,6 +297,8 @@ def main():
         raise ValueError('installed portal companion differs from its paired build')
     if runtime_resources.validate(root, app_source) != runtime_resource_hashes:
         raise RuntimeError('runtime resources changed during build')
+    # Every installed Rust binary carries the notices its build recorded.
+    third_party_notices.validate(root, notice_hashes)
     root_compression.kernel_reads(a.root_compression, config)
     installed_app = root / 'usr/bin/q2nd'
     if (installed_app.resolve() != installed_app or not installed_app.is_file()
@@ -330,6 +336,7 @@ def main():
                 'timezone_data': timezone_data,
                 'bluetooth_firmware': bluetooth,
                 'runtime_resources': runtime_resource_hashes,
+                'third_party_notices': notice_hashes,
                 'usb_runtime': usb_runtime,
                 'portal_phone_radio': portal_radio,
                 'modules': {str(p.relative_to(root)): sha(p) for p in modroot.rglob('*.ko')},
